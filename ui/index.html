@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Claude Agent Web</title>
+    <style>
+      /* 挂载前的兜底背景，与 assets/base.css 的暖色 --bg-deep/--grey-50 保持一致 */
+      html {
+        background: #f9f4ea;
+      }
+      @media (prefers-color-scheme: dark) {
+        html {
+          background: #13110e;
+        }
+      }
+      /* React 挂载前的旋转指示器，防白屏 */
+      .boot-spinner {
+        width: 28px;
+        height: 28px;
+        border: 3px solid rgba(19, 17, 14, 0.15);
+        border-top-color: rgba(19, 17, 14, 0.5);
+        border-radius: 50%;
+        animation: boot-spin 0.8s linear infinite;
+      }
+      @keyframes boot-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div style="display: flex; align-items: center; justify-content: center; height: 100vh">
+        <div class="boot-spinner"></div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

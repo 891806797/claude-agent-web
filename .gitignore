@@ -1,0 +1,32 @@
+# dependencies
+node_modules/
+
+.omc
+
+.codegraph
+
+# env
+.env
+.env.local
+.env.*.local
+
+# build output
+bin/
+dist/
+*.exe
+
+# logs
+*.log
+
+# editor / os
+.idea/
+.omc/
+.vscode/
+Thumbs.db
+.DS_Store
+
+# bun
+.bun/
+
+# drizzle studio
+.drizzle/
