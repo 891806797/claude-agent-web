@@ -15,7 +15,7 @@ Bun + Hono + Drizzle ORM + PostgreSQL 后端模板（强约定范式，供 AI �
 | `bun run db:generate` | 改表后生成迁移（随后必须 `bun run db:migrate`） |
 | `bun test` | 运行测试 |
 | `bun run typecheck && bun run lint` | 类型检查 + biome 检查 |
-| `bun run build` | 打包单文件可执行到 bin/（内嵌前端页面，命名 app-{platform}-{arch}-{version}） |
+| `bun run build` | 打包单文件可执行到 bin/（内嵌前端页面与迁移，命名 app-{platform}-{arch}-{version}） |
 
 ## 关键约定（详见开发规范.md）
 

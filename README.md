@@ -95,26 +95,23 @@ Bun.serve
 
 ```bash
 bun run build
-# 产物：bin/app-{platform}-{arch}-{version}.exe（Windows）+ bin/migrations/
-# 单文件可执行：内嵌 bun 运行时 + 前端页面（ui/dist），约 100MB
+# 产物：bin/app-{platform}-{arch}-{version}.exe（Windows）—— 唯一产物，单文件
+# 内嵌 bun 运行时 + 前端页面 + 数据库迁移，约 100MB
 # 交叉编译：bun run build -- --target=bun-linux-x64（支持 bun-{windows|linux|darwin}-{x64|arm64}）
 ```
 
-部署只需把 `bin/` 拷到目标机器，配置环境变量后直接运行（首次启动自动迁移）：
+部署只需把这一个可执行文件拷到目标机器，配置环境变量后直接运行：
 
 ```powershell
-cd bin
 $env:DATABASE_URL = 'postgres://user:pass@host:5432/dbname'
-$env:MIGRATE_ON_START = 'true'      # 首次启动建表；之后可关掉
-$env:MIGRATIONS_DIR = './migrations'
-$env:PORT = '3000'
 .\app-windows-x64-0.1.0.exe
 ```
 
-Linux/macOS：`DATABASE_URL=... MIGRATE_ON_START=true MIGRATIONS_DIR=./migrations ./app-linux-x64-0.1.0`
-（也会自动读取运行目录下的 `.env`；版本号取自 package.json）
+Linux/macOS：`DATABASE_URL=... ./app-linux-x64-0.1.0`（版本号取自 package.json）
 
-可执行文件同时服务前端页面与 API：`/` 为前端入口，`/api/*`、`/docs` 为后端接口。
+- 编译版**默认启动即迁移**（嵌入的 migrations 自动建表/升级，幂等可重复启动）；关闭设 `MIGRATE_ON_START=false`，换外部迁移目录设 `MIGRATIONS_DIR=./migrations`
+- 也会自动读取运行目录下的 `.env`
+- 可执行文件同时服务前端页面与 API：`/` 为前端入口，`/api/*`、`/docs` 为后端接口
 
 ## 常见问题
 

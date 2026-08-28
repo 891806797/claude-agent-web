@@ -7,8 +7,8 @@ import { app } from './app'
 const logger = getLogger('server')
 
 async function main() {
-  // 编译版部署常用：启动即迁移（MIGRATE_ON_START=true MIGRATIONS_DIR=./migrations）
-  if (env.MIGRATE_ON_START) {
+  // 启动即迁移：显式 MIGRATE_ON_START 优先；未设置时编译版默认开（单文件部署即用），dev 默认关
+  if (env.MIGRATE_ON_START ?? Bun.isStandaloneExecutable) {
     await runMigrations()
   }
 

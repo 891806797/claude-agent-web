@@ -1,18 +1,18 @@
-import { cpSync, existsSync, readdirSync, rmSync, unlinkSync } from 'node:fs'
+import { existsSync, readdirSync, rmSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { $ } from 'bun'
 
 /**
  * 可执行文件打包编排：bun run build [-- --target=bun-linux-x64]
  *
- * 流程：构建前端（ui）-> 编译单文件可执行（--asset 内嵌 ui/dist）-> 汇集迁移文件
+ * 流程：构建前端（ui）-> 编译单文件可执行（--asset 内嵌 ui/dist 与 migrations）
  * 产物（bin/）：
- *   app-{platform}-{arch}-{version}[.exe]  单文件可执行（内嵌 bun 运行时 + 前端页面）
- *   migrations/                            数据库迁移文件（配合 MIGRATE_ON_START=true 使用）
+ *   app-{platform}-{arch}-{version}[.exe]  唯一产物：单文件可执行
+ *   （内嵌 bun 运行时 + 前端页面 + 数据库迁移；编译版默认启动即迁移）
  *
  * 运行方式：
  *   cd bin
- *   MIGRATE_ON_START=true MIGRATIONS_DIR=./migrations DATABASE_URL=... PORT=... ./app-...
+ *   DATABASE_URL=... PORT=... ./app-...
  *   （也可在 bin 下放 .env，bun 编译版仍会自动加载 cwd 的 .env）
  */
 
@@ -62,14 +62,13 @@ async function main() {
     throw new Error('前端构建产物缺失：ui/dist/index.html')
   }
 
-  say(`==> 编译可执行文件（target=${target}，内嵌前端）...`)
+  say(`==> 编译可执行文件（target=${target}，内嵌前端 + 迁移）...`)
   // 注意1：compile 模式走 CLI（Bun.build API 的 compile 在编译产物落盘上不如 CLI 可靠）
   // 注意2：禁用 --bytecode——bun 1.4.0 下 bytecode 与 --asset 嵌入不兼容（嵌入失效），
   //        常驻 web 服务对冷启动不敏感；升级 bun 验证修复后可恢复
-  await $`bun build --compile --minify --sourcemap=none --asset ./${DIST_DIR} --target=${target} --outfile ${OUT_DIR}/app-${platformArch}-${version} src/index.ts`
+  // 注意3：--asset 按目录 basename 挂载到 bunfs 根（ui/dist -> dist/，migrations -> migrations/）
+  await $`bun build --compile --minify --sourcemap=none --asset ./${DIST_DIR} --asset ./${MIGRATIONS_SRC} --target=${target} --outfile ${OUT_DIR}/app-${platformArch}-${version} src/index.ts`
 
-  say('==> 拷贝迁移文件...')
-  cpSync(MIGRATIONS_SRC, `${OUT_DIR}/migrations`, { recursive: true })
   removeSourcemaps(OUT_DIR)
 
   // Windows 编译版由 bun 自动补 .exe 后缀，这里探测实际产物名
@@ -78,20 +77,18 @@ async function main() {
     : `app-${platformArch}-${version}`
 
   say(`
-打包完成。产物结构（bin/）：
-  ${exe}       可执行文件（单文件，内嵌 bun 运行时 + 前端页面，约 100MB 属正常）
-  migrations/  数据库迁移
+打包完成。产物（bin/）：
+  ${exe}  单文件可执行（内嵌 bun 运行时 + 前端页面 + 数据库迁移，约 100MB 属正常）
+  编译版默认启动即迁移；如需关闭设 MIGRATE_ON_START=false
 
 运行示例（Windows PowerShell）：
   cd bin
-  $env:MIGRATE_ON_START = 'true'
-  $env:MIGRATIONS_DIR = './migrations'
   $env:DATABASE_URL = 'postgres://user:pass@host:5432/dbname'
   .\\${exe}
 
 运行示例（Linux/macOS）：
   cd bin
-  MIGRATE_ON_START=true MIGRATIONS_DIR=./migrations DATABASE_URL=... ./${exe}
+  DATABASE_URL=... ./${exe}
 `)
 }
 

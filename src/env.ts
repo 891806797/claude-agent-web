@@ -15,8 +15,8 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .transform((v) => (v ? v.trim() : undefined)),
-  MIGRATE_ON_START: z.stringbool().default(false),
-  MIGRATIONS_DIR: z.string().default('./src/db/migrations'),
+  MIGRATE_ON_START: z.stringbool().optional(),
+  MIGRATIONS_DIR: z.string().optional(),
 })
 
 const parsed = EnvSchema.safeParse(Bun.env)

@@ -5,12 +5,19 @@ import { db } from './index'
 
 /**
  * 运行时迁移（drizzle-orm migrator，非 drizzle-kit CLI）。
- * 使用场景：编译版可执行文件部署时设置 MIGRATE_ON_START=true + MIGRATIONS_DIR=./migrations，
- * 启动即自动迁移；开发环境常规走 `bun run db:migrate`（drizzle-kit）。
+ * 目录解析优先级：显式 MIGRATIONS_DIR > 编译版嵌入目录（打包时 --asset 嵌入，
+ * 挂载于 bunfs 的 migrations/）> 开发默认 ./src/db/migrations。
+ * 开发环境常规走 `bun run db:migrate`（drizzle-kit）。
  */
 export async function runMigrations(): Promise<void> {
   const logger = getLogger('migrate')
-  logger.info({ migrationsDir: env.MIGRATIONS_DIR }, '开始执行数据库迁移')
-  await migrate(db, { migrationsFolder: env.MIGRATIONS_DIR })
+  const migrationsFolder = env.MIGRATIONS_DIR ?? defaultMigrationsFolder()
+  logger.info({ migrationsFolder }, '开始执行数据库迁移')
+  await migrate(db, { migrationsFolder })
   logger.info('数据库迁移完成')
+}
+
+/** 编译版读 bunfs 嵌入目录（--asset 按目录 basename 挂载）；开发读源码目录 */
+function defaultMigrationsFolder(): string {
+  return Bun.isStandaloneExecutable ? `${import.meta.dir}/migrations` : './src/db/migrations'
 }
