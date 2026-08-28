@@ -5,6 +5,7 @@ Bun + Hono + Drizzle ORM + PostgreSQL 后端模板（强约定范式，供 AI �
 ## ⚠️ 开发任何功能前，先读《开发规范.md》
 
 - **活教材**：`src/modules/article/` 是所有业务模块的标准范式——不确定怎么写就照抄它的结构
+- **前端**（ui/）规范见《开发规范.md》第 12 节；活教材 `ui/src/pages/home.tsx`；格式化用 ui 内 prettier（biome 不管 ui/）
 - **禁区**：`src/core/**` 默认禁止修改（`core/error-codes.ts` 仅允许追加错误码）
 
 ## 常用命令

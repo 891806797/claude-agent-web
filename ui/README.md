@@ -35,13 +35,14 @@ bun run format     # prettier 格式化
 
 ```
 src/
-├── App.tsx              # 路由表（框架自验证首页：路由/store/api/Button/toast 全链路）
+├── App.tsx              # 路由表（页面唯一登记处，页面本体在 pages/）
 ├── main.tsx             # 入口：BrowserRouter + <Toaster />
 ├── assets/              # base.css + main.css（全局色调，见上）
 ├── components/ui/       # shadcn 风格基础组件（button / sonner，按需追加）
 ├── lib/
 │   ├── api.ts           # 类型化 API 客户端（解包 {data}，错误抛 ApiError 带 code/traceId）
 │   └── utils.ts         # cn()
+├── pages/               # 业务页面（home.tsx 为范式活教材）
 └── stores/              # zustand（system.ts：/readyz 就绪检查）
 ```
 

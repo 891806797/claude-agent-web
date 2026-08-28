@@ -16,7 +16,7 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
-    // 开发期代理到后端 bun/hono 服务（生产由部署层/nginx 转发）
+    // 开发期代理到后端 bun/hono 服务（生产前端由可执行文件内嵌服务，同源直连）
     proxy: {
       '/api': 'http://localhost:3000',
       '/readyz': 'http://localhost:3000',
