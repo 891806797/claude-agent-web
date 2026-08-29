@@ -1,12 +1,11 @@
-import { api, ApiError } from './api'
+import { api, ApiError, withBase } from './api'
 import type {
   ActiveSessionResult,
   ChatMessage,
-  ModelInfo,
+  Persona,
   Project,
   SessionSummary,
-  SlashCommand,
-  StatsData
+  SlashCommand
 } from './agent-types'
 
 /**
@@ -45,8 +44,9 @@ export const agentApi = {
   openSession: (body: {
     projectId: string
     resumeSessionId?: string
-    model?: string
     firstMessage?: string
+    /** 新会话选定的智能体 id（append 系统提示词）；缺省 = 标准 Claude。resume 不传（后端按绑定快照回填） */
+    personaId?: string
     evict?: boolean
   }) =>
     api.post<{ sessionId: string; workspaceDir: string; evicted?: boolean }>(
@@ -86,17 +86,36 @@ export const agentApi = {
     api.post<void>(`${BASE}/session/rename`, { title }, { headers: sessionHeaders(sid, ws) }),
   rewind: (sid: string, ws: string, messageId: string) =>
     api.post<void>(`${BASE}/session/rewind`, { messageId }, { headers: sessionHeaders(sid, ws) }),
+  /** 切换会话智能体（仅 idle 可切；服务端替换进程并同 sid resume，历史保留）；personaId null = 切回标准 Claude */
+  switchPersona: (sid: string, ws: string, personaId: string | null) =>
+    api.put<{ sessionId: string; workspaceDir: string }>(
+      `${BASE}/session/persona`,
+      { personaId },
+      {
+        headers: sessionHeaders(sid, ws)
+      }
+    ),
+
+  // ---- 智能体定义 ----
+  listPersonas: () => api.get<Persona[]>(`${BASE}/personas`),
+  createPersona: (body: { name: string; description: string; systemPrompt: string }) =>
+    api.post<Persona>(`${BASE}/personas`, body),
+  updatePersona: (
+    id: string,
+    body: Partial<{ name: string; description: string; systemPrompt: string }>
+  ) => api.put<Persona>(`${BASE}/personas/${id}`, body),
+  removePersona: (id: string) => api.delete<void>(`${BASE}/personas/${id}`),
 
   // ---- 探测 ----
   getCommands: (projectId: string) =>
     api.get<SlashCommand[]>(`${BASE}/commands?projectId=${projectId}`),
-  getModels: (projectId: string) => api.get<ModelInfo[]>(`${BASE}/models?projectId=${projectId}`),
   getFiles: (projectId: string, q: string) =>
     api.get<string[]>(`${BASE}/files?projectId=${projectId}&q=${encodeURIComponent(q)}`),
-  getStats: () => api.get<StatsData>(`${BASE}/stats`),
 
-  /** SSE 端点 URL（EventSource 不支持自定义 header，sid/ws 走 query） */
-  eventsUrl: (sid: string, ws: string) => `${BASE}/session/events?sid=${sid}&ws=${encodeDir(ws)}`
+  /** SSE 端点 URL（EventSource 不支持自定义 header，sid/ws 走 query；
+   *  EventSource 不经过 api.request，前缀需显式 withBase） */
+  eventsUrl: (sid: string, ws: string) =>
+    withBase(`${BASE}/session/events?sid=${sid}&ws=${encodeDir(ws)}`)
 }
 
 export { ApiError }

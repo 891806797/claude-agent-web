@@ -1,5 +1,5 @@
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import {
   deleteSession,
   getSessionMessages,
@@ -83,6 +83,7 @@ function sanitizeSession(s: {
     cwd: s.cwd ?? '',
     fileSize: s.fileSize ?? 0,
     createdAt: s.createdAt ?? 0,
+    live: false,
   }
 }
 
@@ -111,6 +112,135 @@ interface CompactBoundaryInfo {
   preTokens: number
 }
 
+/** 转录 JSONL 绝对路径（与 SDK 存储布局一致：CLAUDE_CONFIG_DIR/projects/<encoded-cwd>/） */
+function transcriptPath(username: string, sessionId: string, dir: string): string {
+  return join(userConfigDir(username), 'projects', encodeCwd(dir), `${sessionId}.jsonl`)
+}
+
+/**
+ * 转录是否含真实会话内容（user 消息条目）。
+ * 空会话占位（仅 custom-title 条目）与残留 queue-operation 均视为无内容：CLI 对其 resume
+ * 报 "No conversation found" 立即退出，openSession 须降级为新会话并删除该文件。
+ */
+export async function userSessionTranscriptHasMessages(
+  username: string,
+  sessionId: string,
+  dir: string,
+): Promise<boolean> {
+  let text: string
+  try {
+    text = await readFile(transcriptPath(username, sessionId, dir), 'utf8')
+  } catch {
+    return false
+  }
+  return transcriptHasUserMessage(text)
+}
+
+/** 纯谓词：转录文本是否含 user 条目（行级匹配，供单测） */
+export function transcriptHasUserMessage(text: string): boolean {
+  return text.split('\n').some((line) => line.includes('"type":"user"'))
+}
+
+/** 占位会话标题（新建即落盘的空会话在列表中的显示名；首条消息后由 service 改写为消息摘要） */
+const PLACEHOLDER_TITLE = '新会话'
+
+/**
+ * 新会话占位落盘：写一条 custom-title 转录条目，使 listSessions 立即可见该会话。
+ *
+ * 时序铁律：必须在 CLI 子进程完成启动自检后调用--CLI 启动时若转录文件已存在且指定了
+ * sessionId 会报 "Session ID already in use" 直接退出（实测 CLI 2.1.250）；启动完成后则
+ * 对既有文件按行追加、并携带已有 custom-title。条目格式与 SDK renameSession 落盘一致
+ * （同键后写覆盖先写），getSessionMessages 对其返回 []，deleteSession 可正常删除。
+ */
+export async function writeSessionPlaceholder(
+  username: string,
+  sessionId: string,
+  dir: string,
+): Promise<void> {
+  const filePath = transcriptPath(username, sessionId, dir)
+  try {
+    await stat(filePath)
+    return // 转录已存在（占位重写/竞态兜底）：不覆盖
+  } catch {
+    /* 不存在 -> 写入 */
+  }
+  await mkdir(dirname(filePath), { recursive: true })
+  await writeFile(
+    filePath,
+    `${JSON.stringify({
+      type: 'custom-title',
+      customTitle: PLACEHOLDER_TITLE,
+      sessionId,
+      uuid: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+    })}\n`,
+  )
+}
+
+/** 删除转录文件（仅用于空会话降级：调用方已确认无 user 消息，无真实内容可丢） */
+export async function removeUserSessionTranscript(
+  username: string,
+  sessionId: string,
+  dir: string,
+): Promise<void> {
+  await rm(transcriptPath(username, sessionId, dir), { force: true })
+}
+
+// ===== CLI 槽位登记（"子进程已通过启动自检"信号）=====
+
+const SLOT_POLL_MS = 150
+const SLOT_WAIT_TIMEOUT_MS = 15_000
+
+/**
+ * 等待 CLI 子进程写 sessions/<pid>.json 槽位登记（首条消息前即写入，含 sessionId 与
+ * startedAt）。CLI 因 "Session ID already in use" 启动失败时不写槽位，登记出现即代表
+ * 启动检查已通过、此后写占位转录安全。
+ * sinceMs 过滤同 sid 的陈旧槽位（旧进程残留）；isAlive 提前 bail（子进程已死不再空等）。
+ */
+export async function waitSessionSlotRegistered(
+  username: string,
+  sessionId: string,
+  sinceMs: number,
+  isAlive: () => boolean = () => true,
+): Promise<boolean> {
+  const slotsDir = join(userConfigDir(username), 'sessions')
+  const deadline = Date.now() + SLOT_WAIT_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    if (!isAlive()) return false
+    let names: string[]
+    try {
+      names = await readdir(slotsDir)
+    } catch {
+      await sleep(SLOT_POLL_MS)
+      continue
+    }
+    for (const name of names) {
+      if (!name.endsWith('.json')) continue
+      try {
+        const slot = JSON.parse(await readFile(join(slotsDir, name), 'utf8')) as {
+          sessionId?: unknown
+          startedAt?: unknown
+        }
+        if (
+          slot.sessionId === sessionId &&
+          typeof slot.startedAt === 'number' &&
+          slot.startedAt >= sinceMs - 2_000
+        ) {
+          return true
+        }
+      } catch {
+        /* 单个槽位文件损坏/写入中：忽略 */
+      }
+    }
+    await sleep(SLOT_POLL_MS)
+  }
+  return false
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 /** 读会话 JSONL 索引 compact_boundary 元数据（best-effort，失败返回空 Map） */
 async function readCompactBoundaries(
   username: string,
@@ -118,7 +248,7 @@ async function readCompactBoundaries(
   dir: string,
 ): Promise<Map<string, CompactBoundaryInfo>> {
   const map = new Map<string, CompactBoundaryInfo>()
-  const filePath = join(userConfigDir(username), 'projects', encodeCwd(dir), `${sessionId}.jsonl`)
+  const filePath = transcriptPath(username, sessionId, dir)
   let text: string
   try {
     text = await readFile(filePath, 'utf8')

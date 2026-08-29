@@ -12,6 +12,8 @@ import { bigint, boolean, index, pgTable, text, timestamp, uuid } from 'drizzle-
 export const users = pgTable('users', {
   id: uuid().primaryKey().defaultRandom(),
   username: text().notNull().unique(),
+  /** 角色：admin / user；admin 由 AUTH_ADMIN_USERS 白名单在登录时自动提升（本期仅存储与下发） */
+  role: text().$type<UserRole>().notNull().default('user'),
   mfaSecretEnc: text(),
   mfaBoundAt: timestamp({ withTimezone: true }),
   /** TOTP 防重放：最近一次验证通过的时间片 counter，<= 它的码拒绝复用 */
@@ -38,3 +40,5 @@ export const loginAttempts = pgTable(
 
 export type UserRow = typeof users.$inferSelect
 export type LoginAttemptRow = typeof loginAttempts.$inferSelect
+/** 用户角色值域（users.role） */
+export type UserRole = 'admin' | 'user'

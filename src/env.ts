@@ -18,6 +18,20 @@ const EnvSchema = z.object({
   MIGRATE_ON_START: z.stringbool().optional(),
   MIGRATIONS_DIR: z.string().optional(),
 
+  /** 子路径部署前缀（nginx 反代场景，如 /claude）；同时驱动前端构建 base。
+   *  空或 '/' = 根路径部署（默认）。仅允许 / 开头的子路径，禁止携带协议/主机名。 */
+  BASE_URL: z
+    .string()
+    .optional()
+    .transform((v) => {
+      const s = v?.trim()
+      if (!s || s === '/') return ''
+      return s.replace(/\/+$/, '') // 容忍尾斜杠：'/claude/' -> '/claude'
+    })
+    .refine((v) => v === '' || /^\/[A-Za-z0-9\-_.]+(\/[A-Za-z0-9\-_.]+)*$/.test(v), {
+      message: 'BASE_URL 必须是以 / 开头的子路径（如 /claude），不能含协议、主机名或尾斜杠',
+    }),
+
   // ---- 认证（对齐 claude-agent-desktop 的 OA Web Service 体系）----
   /** OA 登录 Web Service 地址（可为 WSDL 地址，自动去掉 ?wsdl 得到 POST endpoint） */
   AUTH_WEB_SERVICE_URL: z
@@ -31,6 +45,18 @@ const EnvSchema = z.object({
   AUTH_MFA_ENC_KEY: z.string().min(16).optional(),
   /** TOTP 二维码 issuer */
   AUTH_MFA_ISSUER: z.string().default('AI编码智能体-Web'),
+  /** 管理员白名单（逗号分隔用户名）：登录成功时自动提升为 admin 并落库（仅提升不降级） */
+  AUTH_ADMIN_USERS: z
+    .string()
+    .optional()
+    .transform((v) =>
+      v
+        ? v
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [],
+    ),
   /** 登录限流：窗口（分钟）与窗口内最大失败次数 */
   AUTH_LOGIN_WINDOW_MINUTES: z.coerce.number().int().min(1).default(15),
   AUTH_LOGIN_MAX_FAILURES: z.coerce.number().int().min(1).default(5),
@@ -48,6 +74,8 @@ const EnvSchema = z.object({
   AGENT_MAX_SESSIONS_PER_USER: z.coerce.number().int().min(1).default(3),
   /** 全局活跃会话上限 */
   AGENT_MAX_TOTAL_SESSIONS: z.coerce.number().int().min(1).default(24),
+  /** （可选）显式指定 SDK CLI 二进制路径（编译版部署到未内嵌二进制的平台时使用） */
+  AGENT_CLI_PATH: z.string().optional(),
 
   // ---- 日志文件 ----
   /** 按天滚动日志目录（文件名 console-YYYY-MM-DD.log） */

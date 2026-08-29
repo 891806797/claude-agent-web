@@ -120,4 +120,11 @@
   button:not(:disabled) {
     cursor: pointer;
   }
+
+  /* contenteditable 输入框 placeholder（空时显示提示） */
+  .prompt-editor:empty::before {
+    content: attr(data-placeholder);
+    color: var(--text-faint);
+    pointer-events: none;
+  }
 }

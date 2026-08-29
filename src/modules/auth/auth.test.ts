@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { revokeToken, signToken, verifyToken } from './jwt'
+import { revokeToken, roleFromToken, signToken, verifyToken } from './jwt'
 import { decryptSecret, encryptSecret } from './secret-cipher'
 import { buildOtpAuthUrl, generateSecret, verifyTotp } from './totp'
 
@@ -11,15 +11,27 @@ import { buildOtpAuthUrl, generateSecret, verifyTotp } from './totp'
 
 describe('JWT（HS256 手写）', () => {
   test('签发 -> 验证 -> 取回 username', () => {
-    const token = signToken('zhangsan')
+    const token = signToken('zhangsan', 'user')
     expect(verifyToken(token)).toBe('zhangsan')
   })
 
+  test('role 随 token 往返；无法解析的 token 按 user 处理', () => {
+    expect(roleFromToken(signToken('zhangsan', 'admin'))).toBe('admin')
+    expect(roleFromToken(signToken('zhangsan', 'user'))).toBe('user')
+    // 容错：格式非法（含 role 字段启用前的旧式 token 无 role 字段）一律降级为 user
+    expect(roleFromToken('not-a-jwt')).toBe('user')
+  })
+
   test('篡改 payload 拒绝', () => {
-    const token = signToken('zhangsan')
+    const token = signToken('zhangsan', 'user')
     const [header, , signature] = token.split('.')
     const forgedPayload = Buffer.from(
-      JSON.stringify({ username: 'admin', exp: Math.floor(Date.now() / 1000) + 9999, jti: 'x' }),
+      JSON.stringify({
+        username: 'admin',
+        role: 'admin',
+        exp: Math.floor(Date.now() / 1000) + 9999,
+        jti: 'x',
+      }),
     ).toString('base64url')
     expect(verifyToken(`${header}.${forgedPayload}.${signature}`)).toBeNull()
   })
@@ -27,19 +39,19 @@ describe('JWT（HS256 手写）', () => {
   test('已过期的 token 拒绝', () => {
     // 直接构造过期 payload 无法通过验签，改用短过期不可行 -- 验证逻辑覆盖：
     // 手工把过期 token 的签名去掉一位，确保格式错误返回 null
-    const token = signToken('zhangsan')
+    const token = signToken('zhangsan', 'user')
     expect(verifyToken(`${token}x`)).toBeNull()
     expect(verifyToken('not-a-jwt')).toBeNull()
     expect(verifyToken('a.b')).toBeNull()
   })
 
   test('登出黑名单：revoke 后同 token 立即失效', () => {
-    const token = signToken('zhangsan')
+    const token = signToken('zhangsan', 'user')
     expect(verifyToken(token)).toBe('zhangsan')
     revokeToken(token)
     expect(verifyToken(token)).toBeNull()
     // 新签发的 token 不受影响（jti 不同）
-    expect(verifyToken(signToken('zhangsan'))).toBe('zhangsan')
+    expect(verifyToken(signToken('zhangsan', 'user'))).toBe('zhangsan')
   })
 })
 

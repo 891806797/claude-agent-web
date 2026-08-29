@@ -9,6 +9,12 @@ import type { OccupiedInfoData } from './agent.schema'
 import { translateSessionStream } from './agent-event-translator'
 import { buildSessionQueryOptions, type CanUseToolFn } from './agent-query-options'
 import {
+  removeUserSessionTranscript,
+  userSessionTranscriptHasMessages,
+  waitSessionSlotRegistered,
+  writeSessionPlaceholder,
+} from './agent-session-history'
+import {
   APPROVAL_TIMEOUT_MS,
   type ApprovalDecision,
   ApprovalManager,
@@ -64,6 +70,10 @@ export interface SessionContext {
   readonly done: Promise<void>
   /** finalize 防重入标志（closeSession 与自然退出可能竞争） */
   finalized: boolean
+  /** 占位标题生效中（新建空会话已落盘"新会话"占位；首条消息后由 service 改写为消息摘要） */
+  untitled: boolean
+  /** 会话当前生效的 append 系统提示词（最后切换/开启值；undefined = 标准 Claude） */
+  systemPrompt?: string
 }
 
 export interface OpenSessionParams {
@@ -71,11 +81,12 @@ export interface OpenSessionParams {
   /** 已归一化的项目路径（agent_projects.path） */
   projectPath: string
   resumeSessionId?: string
-  model?: string
   firstMessage?: string
   evict?: boolean
   /** 首条消息图片附件 */
   firstImages?: Array<{ dataUrl: string; mime: string }>
+  /** 追加到 claude_code 预设后的系统提示词（persona 注入；缺省 = 标准 Claude） */
+  appendSystemPrompt?: string
 }
 
 export interface OpenSessionOutcome {
@@ -105,52 +116,138 @@ function withDirLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
 
 export function openSession(params: OpenSessionParams): Promise<OpenSessionOutcome> {
   const dir = normalizeDir(params.projectPath)
-  return withDirLock(dir, async () => {
-    const existing = registry.get(dir)
-    let evicted = false
-    if (existing) {
-      if (existing.username !== params.username || !params.evict) {
-        // 他人占用：绝不自动关闭；自己占用：前端确认切换后带 evict 重试
-        throw new AppError('AGENT_SESSION_BUSY', {
-          details: { occupiedBy: occupiedInfo(existing) },
-        })
-      }
-      await closeContext(existing, 'evict')
-      evicted = true
-    }
+  return withDirLock(dir, () => openSessionLocked(params, dir))
+}
 
-    // 配额：全局 / 每用户（锁内 check-then-set 原子；同 dir 已被锁串行）
+/**
+ * 会话切换智能体（锁内 idle 校验 + evict 替换进程）：
+ * 同 sid resume 重开，历史 JSONL 重放（会话保留、人格更换）。
+ * 仅 idle 态允许——turn 进行中/审批挂起中切换会撕裂在途流程。
+ */
+export function switchSessionPersona(params: {
+  username: string
+  projectPath: string
+  sessionId: string
+  /** 新的 append 提示词；缺省 = 切回标准 Claude */
+  appendSystemPrompt?: string
+}): Promise<OpenSessionOutcome> {
+  const dir = normalizeDir(params.projectPath)
+  return withDirLock(dir, async () => {
+    // 锁内校验：检查与替换之间不允许插入消息/审批（requireSessionCtx 语义：非属主统一 404）
+    const existing = registry.get(dir)
     if (
-      registry.size >= env.AGENT_MAX_TOTAL_SESSIONS ||
-      countByUser(params.username) >= env.AGENT_MAX_SESSIONS_PER_USER
+      !existing ||
+      existing.sessionId !== params.sessionId ||
+      existing.username !== params.username
     ) {
-      throw new AppError('AGENT_SESSION_LIMIT', {
-        message: `活跃会话数已达上限（每人 ${env.AGENT_MAX_SESSIONS_PER_USER} 个 / 全局 ${env.AGENT_MAX_TOTAL_SESSIONS} 个）`,
+      throw new AppError('AGENT_SESSION_NOT_FOUND', {
+        message: '会话不存在或已不活跃，请刷新页面恢复',
       })
     }
-
-    ensureUserConfigDir(params.username)
-    // 新会话预生成 sessionId（经 Options.sessionId 传给 CLI）。CLI 2.x 在首条用户消息前
-    // 不发 system/init（streaming-input 模式实测零输出），等 init 才返回会 45s 互等死锁；
-    // 预设 id 让 openSession 即时返回，会话文件在首条消息时落地。
-    const sessionId = params.resumeSessionId ?? crypto.randomUUID()
-    const ctx = createSessionContext(params, dir, sessionId)
-    // 同步占位（防同 dir 并发；锁外快照可见 starting 态）
-    registry.set(dir, ctx)
-
-    // 首条消息（CLI 收到首条输入才启动会话：init 随之到达，消息按序进入 turn）
-    if (params.firstMessage || params.firstImages?.length) {
-      pushMessageInternal(ctx, buildUserMessage(params.firstMessage ?? '', params.firstImages))
+    // starting = 会话就绪但从未有 turn（CLI 首条用户消息前不发事件，state 停在 starting）：
+    // 无在途流程可安全切换；turn-running（含审批挂起中）才是真正不可切
+    if (existing.state !== 'idle' && existing.state !== 'starting') {
+      throw new AppError('AGENT_PERSONA_SWITCH_BUSY')
     }
-
-    return { sessionId, workspaceDir: dir, evicted }
+    return openSessionLocked(
+      {
+        username: params.username,
+        projectPath: params.projectPath,
+        resumeSessionId: params.sessionId,
+        appendSystemPrompt: params.appendSystemPrompt,
+        evict: true,
+      },
+      dir,
+    )
   })
+}
+
+/** openSession 的锁内主体（openSession 与 switchSessionPersona 共用；不可直接调用） */
+async function openSessionLocked(
+  params: OpenSessionParams,
+  dir: string,
+): Promise<OpenSessionOutcome> {
+  const existing = registry.get(dir)
+  let evicted = false
+  if (existing) {
+    if (existing.username !== params.username || !params.evict) {
+      // 他人占用：绝不自动关闭；自己占用：前端确认切换后带 evict 重试
+      throw new AppError('AGENT_SESSION_BUSY', {
+        details: { occupiedBy: occupiedInfo(existing) },
+      })
+    }
+    await closeContext(existing, 'evict')
+    evicted = true
+  }
+
+  // 配额：全局 / 每用户（锁内 check-then-set 原子；同 dir 已被锁串行。
+  // evict 已先关旧释放名额，切换不会被自己的旧会话挡住）
+  if (
+    registry.size >= env.AGENT_MAX_TOTAL_SESSIONS ||
+    countByUser(params.username) >= env.AGENT_MAX_SESSIONS_PER_USER
+  ) {
+    throw new AppError('AGENT_SESSION_LIMIT', {
+      message: `活跃会话数已达上限（每人 ${env.AGENT_MAX_SESSIONS_PER_USER} 个 / 全局 ${env.AGENT_MAX_TOTAL_SESSIONS} 个）`,
+    })
+  }
+
+  ensureUserConfigDir(params.username)
+  // 新会话预生成 sessionId（经 Options.sessionId 传给 CLI）。CLI 2.x 在首条用户消息前
+  // 不发 system/init（streaming-input 模式实测零输出），等 init 才返回会 45s 互等死锁；
+  // 预设 id 让 openSession 即时返回。
+  const sessionId = params.resumeSessionId ?? crypto.randomUUID()
+  // 空会话降级：转录无 user 消息（占位会话/已被清理）时 CLI resume 报 No conversation
+  // 立即退出，ctx 被 process_exit 清理致前端 events/messages 全 404。删除无内容的转录
+  // 文件（仅占位条目可丢；不删则 CLI 以同 sid 新开会话报 Session ID already in use），
+  // 按新会话开启并沿用请求的 sid（空历史语义等价，前端 URL/列表零变化）。
+  let resumeSid = params.resumeSessionId
+  if (resumeSid && !(await userSessionTranscriptHasMessages(params.username, resumeSid, dir))) {
+    registryLogger.warn(
+      { username: params.username, sessionId: resumeSid },
+      'resume 目标转录无消息内容，降级为新会话',
+    )
+    await removeUserSessionTranscript(params.username, resumeSid, dir)
+    resumeSid = undefined
+  }
+  const spawnTs = Date.now()
+  const ctx = createSessionContext(params, dir, sessionId, resumeSid)
+  // 同步占位（防同 dir 并发；锁外快照可见 starting 态）
+  registry.set(dir, ctx)
+
+  if (params.firstMessage || params.firstImages?.length) {
+    // 首条消息（CLI 收到首条输入才启动会话：init 随之到达，消息按序进入 turn）
+    pushMessageInternal(ctx, buildUserMessage(params.firstMessage ?? '', params.firstImages))
+  } else if (!resumeSid) {
+    // 新会话占位落盘：等 CLI 完成启动自检后写 custom-title，会话即时进入列表（resume
+    // 与带首条消息的开启不占位：前者历史已在盘上，后者转录随消息即刻落地）。
+    // best-effort：失败/超时仅告警不阻断（会话可用，列表延迟到首条消息后才可见）。
+    const registered = await waitSessionSlotRegistered(
+      params.username,
+      sessionId,
+      spawnTs,
+      () => ctx.state !== 'closing' && ctx.state !== 'closed',
+    )
+    if (!registered) {
+      registryLogger.warn({ sessionId }, 'CLI 槽位登记未出现，跳过会话占位落盘')
+    } else {
+      try {
+        await writeSessionPlaceholder(params.username, sessionId, dir)
+        ctx.untitled = true
+      } catch (err) {
+        registryLogger.warn({ err, sessionId }, '会话占位落盘失败')
+      }
+    }
+  }
+
+  return { sessionId, workspaceDir: dir, evicted }
 }
 
 function createSessionContext(
   params: OpenSessionParams,
   dir: string,
   sessionId: string,
+  /** 经转录存在性校验后的 resume 目标（undefined = 新会话，sessionId 已预设） */
+  resumeSid?: string,
 ): SessionContext {
   const abortController = new AbortController()
   const stream = new SdkInputStream(abortController.signal)
@@ -191,9 +288,9 @@ function createSessionContext(
     options: buildSessionQueryOptions({
       username: params.username,
       cwd: dir,
-      sessionId: params.resumeSessionId ? undefined : sessionId,
-      ...(params.model ? { model: params.model } : {}),
-      ...(params.resumeSessionId ? { resume: params.resumeSessionId } : {}),
+      sessionId: resumeSid ? undefined : sessionId,
+      ...(resumeSid ? { resume: resumeSid } : {}),
+      ...(params.appendSystemPrompt ? { appendSystemPrompt: params.appendSystemPrompt } : {}),
       abortController,
       canUseTool: makeCanUseTool(() => ctx, approvals),
       sessionLogger,
@@ -219,6 +316,8 @@ function createSessionContext(
     seq: 0,
     done,
     finalized: false,
+    untitled: false,
+    systemPrompt: params.appendSystemPrompt,
   }
 
   void translateSessionStream(queryObj, {
@@ -510,8 +609,12 @@ const janitor = setInterval(() => {
       void closeContext(ctx, 'life_limit')
       continue
     }
-    // 空闲回收：idle 且超时无显式操作（发消息/审批/interrupt/attach 刷新；SSE 连接不算）
-    if (ctx.state === 'idle' && now - ctx.lastActiveAt > env.AGENT_SESSION_IDLE_MINUTES * 60_000) {
+    // 空闲回收：idle/starting（就绪待命）且超时无显式操作（发消息/审批/interrupt/attach 刷新；SSE 连接不算）
+    // starting 纳入：CLI 首条用户消息前不发事件，空会话否则永不回收白占配额
+    if (
+      (ctx.state === 'idle' || ctx.state === 'starting') &&
+      now - ctx.lastActiveAt > env.AGENT_SESSION_IDLE_MINUTES * 60_000
+    ) {
       registryLogger.info({ ws: ctx.workspaceDir, username: ctx.username }, '会话空闲回收')
       void closeContext(ctx, 'idle_gc')
     }
@@ -521,25 +624,45 @@ janitor.unref?.()
 
 // ===== 启动清扫：杀死上次崩溃遗留的 SDK 孤儿子进程 =====
 
-/** claude.exe 位于 node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/，可执行路径含 claude-agent-sdk 即为 SDK 子进程 */
+/**
+ * SDK CLI 二进制位于 node_modules/@anthropic-ai/claude-agent-sdk-<platform>/，可执行路径
+ * 含 claude-agent-sdk 即为 SDK 子进程。服务刚启动不存在合法子进程，见即孤儿（Windows
+ * 父死子不死且无 Job Object 兜底；POSIX 下父亡后 stdin 管道断裂 CLI 通常自行退出，此处
+ * 仅兜底极端卡死进程）。
+ */
 export async function startupOrphanSweep(): Promise<void> {
-  if (process.platform !== 'win32') return
-  // 服务刚启动不存在合法子进程，见即孤儿（Windows 父死子不死且无 Job Object 兜底）
-  const script =
-    "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*claude-agent-sdk*' } | ForEach-Object { Write-Output $_.ProcessId; taskkill /F /PID $_.ProcessId }"
+  if (process.platform === 'win32') {
+    const script =
+      "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*claude-agent-sdk*' } | ForEach-Object { Write-Output $_.ProcessId; taskkill /F /PID $_.ProcessId }"
+    try {
+      const proc = Bun.spawnSync(['powershell', '-NoProfile', '-Command', script])
+      const pids = parsePidList(proc.stdout.toString())
+      if (pids.length > 0) {
+        registryLogger.warn({ pids }, '启动清扫：终止孤儿 claude 子进程')
+      }
+    } catch (err) {
+      registryLogger.warn({ err }, '启动清扫失败（不影响服务启动）')
+    }
+    return
+  }
+  // POSIX：pgrep -f 匹配 SDK 平台包二进制的完整命令行（pgrep 自身与本服务命令行均不含该串）
   try {
-    const proc = Bun.spawnSync(['powershell', '-NoProfile', '-Command', script])
-    const out = proc.stdout.toString().trim()
-    const pids = out
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => /^\d+$/.test(l))
+    const list = Bun.spawnSync(['pgrep', '-f', 'claude-agent-sdk'])
+    const pids = parsePidList(list.stdout.toString())
     if (pids.length > 0) {
+      Bun.spawnSync(['kill', '-9', ...pids])
       registryLogger.warn({ pids }, '启动清扫：终止孤儿 claude 子进程')
     }
   } catch (err) {
     registryLogger.warn({ err }, '启动清扫失败（不影响服务启动）')
   }
+}
+
+function parsePidList(out: string): string[] {
+  return out
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => /^\d+$/.test(l))
 }
 
 // ===== 内部工具 =====

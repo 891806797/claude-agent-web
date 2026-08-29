@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { type TranslateHandlers, translateSessionStream } from './agent-event-translator'
+import { transcriptHasUserMessage } from './agent-session-history'
 import {
   APPROVAL_TIMEOUT_MS,
   type ApprovalDecision,
@@ -25,8 +26,13 @@ describe('paths', () => {
     expect(decodeDir(enc)).toBe(dir)
   })
 
-  test('normalizeDir 归一：正斜杠 + 小写', () => {
-    expect(normalizeDir('D:/Worker\\Demo')).toBe(normalizeDir('d:\\worker\\demo'))
+  test('normalizeDir 归一：win32 正斜杠 + 小写；POSIX 保留大小写', () => {
+    if (process.platform === 'win32') {
+      expect(normalizeDir('D:/Worker\\Demo')).toBe(normalizeDir('d:\\worker\\demo'))
+    } else {
+      // POSIX 文件系统大小写敏感：resolve 保留原样，不得小写化/改分隔符
+      expect(normalizeDir('/Home/Worker')).toBe('/Home/Worker')
+    }
   })
 })
 
@@ -136,6 +142,44 @@ describe('ApprovalManager', () => {
   test('resolve 不存在的 toolCallId → false（已处理/超时）', () => {
     const { mgr } = makeManager()
     expect(mgr.resolve('nonexistent', { allowed: true })).toBe(false)
+  })
+})
+
+// ===== agent-session-history（转录内容判定）=====
+
+describe('transcriptHasUserMessage', () => {
+  test('仅 custom-title 占位 -> false（空会话，须降级为新会话）', () => {
+    expect(
+      transcriptHasUserMessage(
+        `${JSON.stringify({
+          type: 'custom-title',
+          customTitle: '新会话',
+          sessionId: 's1',
+          uuid: 'u1',
+          timestamp: '2026-08-29T00:00:00.000Z',
+        })}\n`,
+      ),
+    ).toBe(false)
+  })
+
+  test('残留 queue-operation（无 user 条目）-> false', () => {
+    const lines = [
+      '{"type":"queue-operation","operation":"enqueue","content":"你好"}',
+      '{"type":"queue-operation","operation":"dequeue"}',
+    ]
+    expect(transcriptHasUserMessage(lines.join('\n'))).toBe(false)
+  })
+
+  test('含 user 消息条目 -> true（占位 + 真实消息混合）', () => {
+    const lines = [
+      '{"type":"custom-title","customTitle":"新会话","sessionId":"s1"}',
+      '{"parentUuid":null,"type":"user","message":{"role":"user","content":"你好"}}',
+    ]
+    expect(transcriptHasUserMessage(lines.join('\n'))).toBe(true)
+  })
+
+  test('空文本/不存在文件场景 -> false', () => {
+    expect(transcriptHasUserMessage('')).toBe(false)
   })
 })
 

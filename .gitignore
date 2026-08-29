@@ -5,6 +5,12 @@ node_modules/
 
 .codegraph
 
+data
+
+logs
+
+.playwright-mcp
+
 # env
 .env
 .env.local

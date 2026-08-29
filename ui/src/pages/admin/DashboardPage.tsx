@@ -3,7 +3,8 @@ import { Activity, Cpu, FolderTree, Gauge, Users, Zap } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { toast } from '@/components/ui/sonner'
-import { agentApi, ApiError } from '@/lib/agent-api'
+import { ApiError } from '@/lib/agent-api'
+import { adminApi } from '@/lib/admin-api'
 import type { StatsData } from '@/lib/agent-types'
 import { cn } from '@/lib/utils'
 
@@ -50,7 +51,7 @@ export function DashboardPage(): React.JSX.Element {
   const fetchStats = async (): Promise<void> => {
     setLoading(true)
     try {
-      setStats(await agentApi.getStats())
+      setStats(await adminApi.getStats())
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : '加载统计失败')
     } finally {
@@ -68,7 +69,7 @@ export function DashboardPage(): React.JSX.Element {
   const hist = stats?.historical
 
   return (
-    <main className="min-h-screen bg-background p-6">
+    <main className="bg-background p-4 md:p-6">
       <header className="mb-6 flex items-center gap-3">
         <h1 className="text-xl font-semibold text-foreground">运行看板</h1>
         <Badge variant="secondary" className="gap-1">
@@ -77,14 +78,6 @@ export function DashboardPage(): React.JSX.Element {
           />
           {loading ? '刷新中' : `实时（${REFRESH_MS / 1000}s）`}
         </Badge>
-        <div className="ml-auto flex gap-3 text-sm">
-          <a href="/chat" className="text-primary hover:underline">
-            聊天
-          </a>
-          <a href="/admin" className="text-primary hover:underline">
-            管理
-          </a>
-        </div>
       </header>
 
       {/* 顶部指标卡 */}

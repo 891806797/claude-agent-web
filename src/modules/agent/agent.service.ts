@@ -3,7 +3,6 @@ import { join, relative } from 'node:path'
 import {
   type Query,
   query,
-  type ModelInfo as SDKModelInfo,
   type SlashCommand as SDKSlashCommand,
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk'
@@ -15,8 +14,17 @@ import { authRepository } from '@/modules/auth/auth.repository'
 import type { PageQuery } from '@/utils/pagination'
 import { getOffset } from '@/utils/pagination'
 import { agentRepository } from './agent.repository'
-import type { ApprovalData, CreateProjectData, OpenSessionData, Project } from './agent.schema'
-import { toProject } from './agent.schema'
+import type {
+  ApprovalData,
+  CreatePersonaData,
+  CreateProjectData,
+  OpenSessionData,
+  Persona,
+  Project,
+  SwitchPersonaData,
+  UpdatePersonaData,
+} from './agent.schema'
+import { toPersona, toProject } from './agent.schema'
 import { buildProbeQueryOptions } from './agent-query-options'
 import {
   deleteUserSession,
@@ -28,7 +36,7 @@ import type { PendingApprovalView } from './approval-manager'
 import { normalizeDir } from './paths'
 import type { SessionContext } from './session-registry'
 import * as registry from './session-registry'
-import type { ChatMessage, ModelInfo, SanitizedSession, SlashCommand } from './sse-events'
+import type { ChatMessage, SanitizedSession, SlashCommand } from './sse-events'
 
 /**
  * agent 业务层 —— 不 import hono 任何内容（可独立单测）。
@@ -45,6 +53,71 @@ import type { ChatMessage, ModelInfo, SanitizedSession, SlashCommand } from './s
 async function listProjects(): Promise<Project[]> {
   const rows = await agentRepository.listProjects(db)
   return rows.map(toProject)
+}
+
+// ===== 智能体定义 =====
+
+async function listPersonas(): Promise<Persona[]> {
+  return (await agentRepository.listPersonas(db)).map(toPersona)
+}
+
+async function createPersona(data: CreatePersonaData): Promise<Persona> {
+  if (await agentRepository.findPersonaByName(db, data.name)) {
+    throw new AppError('AGENT_PERSONA_NAME_EXISTS')
+  }
+  const row = await agentRepository.createPersona(db, data)
+  log().info({ personaId: row.id, name: row.name }, '智能体已创建')
+  return toPersona(row)
+}
+
+async function updatePersona(id: string, data: UpdatePersonaData): Promise<Persona> {
+  const existing = await agentRepository.findPersonaById(db, id)
+  if (!existing) {
+    throw new AppError('AGENT_PERSONA_NOT_FOUND')
+  }
+  if (
+    data.name &&
+    data.name !== existing.name &&
+    (await agentRepository.findPersonaByName(db, data.name))
+  ) {
+    throw new AppError('AGENT_PERSONA_NAME_EXISTS')
+  }
+  const row = await agentRepository.updatePersona(db, id, data)
+  if (!row) {
+    // 已判存在，此处仅防并发删除的极窄窗口
+    throw new AppError('AGENT_PERSONA_NOT_FOUND')
+  }
+  log().info({ personaId: id }, '智能体已更新')
+  return toPersona(row)
+}
+
+async function removePersona(id: string): Promise<void> {
+  // 绑定快照自足（personaName+systemPrompt 已落库）：删除不影响已开会话的 resume 注入与展示
+  const removed = await agentRepository.removePersona(db, id)
+  if (!removed) {
+    throw new AppError('AGENT_PERSONA_NOT_FOUND')
+  }
+  log().info({ personaId: id }, '智能体已删除')
+}
+
+/** persona 解析结果：append 提示词 + 绑定快照落库所需字段 */
+interface ResolvedPersona {
+  appendSystemPrompt: string
+  personaId: string
+  personaName: string
+}
+
+/** 显式 personaId → persona 行（404 兜底） */
+async function resolvePersona(personaId: string): Promise<ResolvedPersona> {
+  const persona = await agentRepository.findPersonaById(db, personaId)
+  if (!persona) {
+    throw new AppError('AGENT_PERSONA_NOT_FOUND')
+  }
+  return {
+    appendSystemPrompt: persona.systemPrompt,
+    personaId: persona.id,
+    personaName: persona.name,
+  }
 }
 
 async function createProject(username: string, data: CreateProjectData): Promise<Project> {
@@ -115,7 +188,23 @@ async function listSessions(
   page: PageQuery,
 ): Promise<SanitizedSession[]> {
   const dir = await requireProjectDir(projectId)
-  return listUserSessions(username, dir, { limit: page.pageSize, offset: getOffset(page) })
+  const active = registry.getActiveSession(dir)
+  const sessions = await listUserSessions(username, dir, {
+    limit: page.pageSize,
+    offset: getOffset(page),
+  })
+  // personaName 注入：批量查绑定快照（无绑定 = 标准 Claude，缺省不出现）
+  const bindings = await agentRepository.findSessionPersonas(
+    db,
+    sessions.map((s) => s.id),
+  )
+  const nameBySid = new Map(bindings.map((b) => [b.sessionId, b.personaName]))
+  // live 注入：该 workspace 的活跃会话（sid 匹配）标记存活，前端列表显示活点
+  return sessions.map((s) => ({
+    ...s,
+    live: active?.sessionId === s.id,
+    ...(nameBySid.get(s.id) ? { personaName: nameBySid.get(s.id)! } : {}),
+  }))
 }
 
 async function getSessionMessages(
@@ -170,14 +259,38 @@ export function requireSessionCtx(
 
 async function openSession(username: string, data: OpenSessionData) {
   const projectPath = await requireProjectDir(data.projectId)
+  // persona 解析优先级：显式 personaId > resume 绑定快照（防人格漂移）> 标准 Claude
+  let persona: ResolvedPersona | undefined
+  if (data.personaId) {
+    persona = await resolvePersona(data.personaId)
+  } else if (data.resumeSessionId) {
+    const bound = await agentRepository.findSessionPersona(db, data.resumeSessionId)
+    if (bound) {
+      persona = {
+        appendSystemPrompt: bound.systemPrompt,
+        personaId: bound.personaId,
+        personaName: bound.personaName,
+      }
+    }
+  }
   const outcome = await registry.openSession({
     username,
     projectPath,
     ...(data.resumeSessionId ? { resumeSessionId: data.resumeSessionId } : {}),
-    ...(data.model ? { model: data.model } : {}),
     ...(data.firstMessage ? { firstMessage: data.firstMessage } : {}),
     ...(data.evict ? { evict: true } : {}),
+    ...(persona ? { appendSystemPrompt: persona.appendSystemPrompt } : {}),
   })
+  // 绑定快照落库（幂等覆盖；resume 回填写回同值不变语义。
+  // 注：极罕见情况下 SDK resume 后换 sid，绑定仍记请求 sid——该会话下次 resume 退化为标准，可接受）
+  if (persona) {
+    await agentRepository.upsertSessionPersona(db, {
+      sessionId: outcome.sessionId,
+      personaId: persona.personaId,
+      personaName: persona.personaName,
+      systemPrompt: persona.appendSystemPrompt,
+    })
+  }
   log().info(
     {
       username,
@@ -185,9 +298,41 @@ async function openSession(username: string, data: OpenSessionData) {
       ws: outcome.workspaceDir,
       evicted: outcome.evicted,
       resume: Boolean(data.resumeSessionId),
+      persona: persona?.personaName,
     },
     '会话已开启',
   )
+  return outcome
+}
+
+/**
+ * 会话切换智能体：锁内 idle 校验（turn 进行中/审批挂起 409）+ evict 替换进程（同 sid
+ * resume 重开，历史重放）。personaId 缺省/null = 切回标准 Claude（删绑定）。
+ */
+async function switchSessionPersona(
+  username: string,
+  workspaceDir: string,
+  sessionId: string,
+  data: SwitchPersonaData,
+) {
+  const persona = data.personaId ? await resolvePersona(data.personaId) : undefined
+  const outcome = await registry.switchSessionPersona({
+    username,
+    projectPath: workspaceDir,
+    sessionId,
+    ...(persona ? { appendSystemPrompt: persona.appendSystemPrompt } : {}),
+  })
+  if (persona) {
+    await agentRepository.upsertSessionPersona(db, {
+      sessionId: outcome.sessionId,
+      personaId: persona.personaId,
+      personaName: persona.personaName,
+      systemPrompt: persona.appendSystemPrompt,
+    })
+  } else {
+    await agentRepository.deleteSessionPersona(db, outcome.sessionId)
+  }
+  log().info({ username, sessionId, persona: persona?.personaName ?? '(标准)' }, '会话智能体已切换')
   return outcome
 }
 
@@ -198,7 +343,25 @@ async function sendMessage(
   data: { text: string; images?: Array<{ dataUrl: string; mime: string }> },
 ): Promise<{ queued: boolean }> {
   const ctx = requireSessionCtx(username, workspaceDir, sessionId)
-  return registry.sendMessage(ctx, registry.buildUserMessage(data.text, data.images))
+  const result = registry.sendMessage(ctx, registry.buildUserMessage(data.text, data.images))
+  // 占位标题改写：空会话首条消息把"新会话"换为消息摘要（对齐既有 UX：标题≈首条消息；
+  // customTitle 会遮蔽 SDK 的 firstPrompt 摘要，不写则列表永远显示"新会话"）。best-effort。
+  if (ctx.untitled && data.text.trim()) {
+    ctx.untitled = false
+    renameUserSession(username, sessionId, workspaceDir, buildSessionTitle(data.text)).catch(
+      (err) => {
+        log().warn({ err, sessionId }, '会话标题自动改写失败')
+      },
+    )
+  }
+  return result
+}
+
+/** 会话标题摘要：首行、空白折叠为单空格、按码点截断至 50 字符 */
+function buildSessionTitle(text: string): string {
+  const firstLine = text.trim().split(/\r?\n/)[0] ?? ''
+  const collapsed = firstLine.replace(/\s+/g, ' ').trim()
+  return Array.from(collapsed).slice(0, 50).join('')
 }
 
 async function approve(
@@ -255,12 +418,18 @@ async function getActiveSessionInfo(username: string, workspaceDir: string) {
     // 他人占用：绝不自动关闭，只返回占用信息供前端提示等待
     return { active: null, occupiedBy: registry.occupiedInfo(ctx) }
   }
+  // 绑定快照（DB）是人格事实源：personaId/personaName 供前端选择器校准选中态与显示名
+  // （快照不被 persona 增删改影响，attach/切换后回读永远与该会话注入一致）
+  const bound = await agentRepository.findSessionPersona(db, ctx.sessionId)
   return {
     active: {
       sessionId: ctx.sessionId,
       state: ctx.state,
       startedAt: ctx.createdAt,
       turns: ctx.turns,
+      ...(bound ? { personaId: bound.personaId, personaName: bound.personaName } : {}),
+      // 当前生效人格（最后切换/开启值）：前端选择器以此校准显示
+      ...(ctx.systemPrompt ? { systemPrompt: ctx.systemPrompt } : {}),
     },
   }
 }
@@ -346,7 +515,6 @@ function neverYieldingIterable(): AsyncIterable<SDKUserMessage> {
 
 /** 缓存按 `${username}:${dir}` 键控：不同用户 CLAUDE_CONFIG_DIR 不同，项目级 skills/命令可能不同 */
 const commandsCache = new Map<string, Promise<SlashCommand[]>>()
-const modelsCache = new Map<string, Promise<ModelInfo[]>>()
 
 async function probeControl<T>(
   username: string,
@@ -399,28 +567,12 @@ async function getCommands(username: string, projectId: string): Promise<SlashCo
   )
 }
 
-async function getModels(username: string, projectId: string): Promise<ModelInfo[]> {
-  const dir = await requireProjectDir(projectId)
-  return cachedProbe(modelsCache, `${username}:${dir}`, () =>
-    probeControl(username, dir, async (q) => (await q.supportedModels()).map(toModelDto)),
-  )
-}
-
 function toCommandDto(cmd: SDKSlashCommand): SlashCommand {
   return {
     name: cmd.name,
     description: cmd.description ?? '',
     argumentHint: cmd.argumentHint ?? '',
     ...(cmd.aliases ? { aliases: cmd.aliases } : {}),
-  }
-}
-
-function toModelDto(m: SDKModelInfo): ModelInfo {
-  return {
-    value: m.value,
-    displayName: m.displayName,
-    description: m.description ?? '',
-    ...(m.supportsEffort !== undefined ? { supportsEffort: m.supportsEffort } : {}),
   }
 }
 
@@ -531,6 +683,11 @@ export const agentService = {
   listProjects,
   createProject,
   removeProject,
+  listPersonas,
+  createPersona,
+  updatePersona,
+  removePersona,
+  switchSessionPersona,
   listSessions,
   getSessionMessages,
   deleteSession,
@@ -543,7 +700,6 @@ export const agentService = {
   closeSession,
   getActiveSessionInfo,
   getCommands,
-  getModels,
   getFiles,
   getStats,
 }

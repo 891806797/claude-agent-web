@@ -1,5 +1,5 @@
 import { z } from '@hono/zod-openapi'
-import type { AgentProjectRow } from './agent.table'
+import type { AgentPersonaRow, AgentProjectRow } from './agent.table'
 
 /**
  * agent 模块的 zod DTO —— 请求校验、TS 类型、OpenAPI 文档的唯一真源。
@@ -36,6 +36,41 @@ export const toProject = (row: AgentProjectRow): Project => ({
   createdAt: row.createdAt.toISOString(),
 })
 
+// ===== 智能体定义 =====
+
+export const CreatePersonaInput = z.object({
+  name: z.string().min(1).max(50).openapi({ example: '代码审查专员' }),
+  description: z.string().max(500).openapi({ example: '专注代码质量与缺陷审查' }),
+  /** 追加到 claude_code 预设后的系统提示词（原文注入，不自动包装） */
+  systemPrompt: z.string().min(1).max(50000).openapi({ example: '你是一名严谨的代码审查员……' }),
+})
+
+export const UpdatePersonaInput = CreatePersonaInput.partial()
+
+export const PersonaDto = z
+  .object({
+    id: z.string().uuid(),
+    name: z.string(),
+    description: z.string(),
+    systemPrompt: z.string(),
+    createdAt: z.iso.datetime(),
+    updatedAt: z.iso.datetime(),
+  })
+  .openapi('AgentPersona')
+
+export type Persona = z.infer<typeof PersonaDto>
+export type CreatePersonaData = z.infer<typeof CreatePersonaInput>
+export type UpdatePersonaData = z.infer<typeof UpdatePersonaInput>
+
+export const toPersona = (row: AgentPersonaRow): Persona => ({
+  id: row.id,
+  name: row.name,
+  description: row.description,
+  systemPrompt: row.systemPrompt,
+  createdAt: row.createdAt.toISOString(),
+  updatedAt: row.updatedAt.toISOString(),
+})
+
 // ===== 会话操作 header 协议 =====
 
 /**
@@ -54,10 +89,10 @@ export const OpenSessionInput = z.object({
   projectId: z.string().uuid(),
   /** resume：续接历史会话 id（缺省 = 新会话） */
   resumeSessionId: z.string().uuid().optional(),
-  /** 覆盖模型（缺省用网关默认） */
-  model: z.string().max(100).optional(),
   /** 开会话即发首条消息（新会话常用；SDK init 需 user message 才产出 session_id 之外的内容） */
   firstMessage: z.string().max(50000).optional(),
+  /** 自定义智能体 id：新会话选定 persona（append 系统提示词）；缺省 = 标准 Claude */
+  personaId: z.string().uuid().optional(),
   /** 同目录被自己占用时原子关旧开新（切换确认后携带） */
   evict: z.boolean().optional(),
 })
@@ -71,6 +106,19 @@ export const OpenSessionResult = z.object({
 })
 
 export type OpenSessionData = z.infer<typeof OpenSessionInput>
+
+// ===== 会话切换智能体 =====
+
+/** personaId 传 null（或缺省）= 切回标准 Claude（删除绑定） */
+export const SwitchPersonaInput = z.object({
+  personaId: z
+    .string()
+    .uuid()
+    .nullable()
+    .openapi({ example: null, description: '目标智能体 id；null = 标准 Claude' }),
+})
+
+export type SwitchPersonaData = z.infer<typeof SwitchPersonaInput>
 
 // ===== 发消息 =====
 
@@ -129,6 +177,9 @@ export const SessionSummaryDto = z
     cwd: z.string(),
     fileSize: z.number(),
     createdAt: z.number(),
+    live: z.boolean().openapi({ example: false, description: '会话当前存活（有活跃进程）' }),
+    /** 会话绑定的智能体名快照（无绑定则缺省 = 标准 Claude） */
+    personaName: z.string().optional(),
   })
   .openapi('AgentSession')
 
@@ -141,6 +192,12 @@ export const ActiveSessionDto = z
     state: SessionStateEnum,
     startedAt: z.number().openapi({ description: 'epoch ms' }),
     turns: z.number(),
+    /** 会话绑定的智能体 id（绑定快照事实源；无绑定则缺省 = 标准 Claude） */
+    personaId: z.string().uuid().optional(),
+    /** 绑定名快照（persona 事后增删改不影响此值） */
+    personaName: z.string().optional(),
+    /** 会话当前生效的 append 系统提示词（最后切换值；标准 Claude 缺省） */
+    systemPrompt: z.string().optional(),
   })
   .openapi('AgentActiveSession')
 
@@ -198,15 +255,6 @@ export const SlashCommandDto = z
     aliases: z.array(z.string()).optional(),
   })
   .openapi('AgentSlashCommand')
-
-export const ModelInfoDto = z
-  .object({
-    value: z.string(),
-    displayName: z.string(),
-    description: z.string(),
-    supportsEffort: z.boolean().optional(),
-  })
-  .openapi('AgentModelInfo')
 
 export const RenameSessionInput = z.object({ title: z.string().min(1).max(200) })
 

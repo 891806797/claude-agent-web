@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { CaptchaPuzzle } from '@/components/CaptchaPuzzle'
-import { useAuthStore } from '@/stores/auth'
+import { useAuthStore, type UserRole } from '@/stores/auth'
 import { api, ApiError } from '@/lib/api'
 
 type Step = 'credentials' | 'bind' | 'verify' | 'reset'
@@ -49,8 +49,8 @@ export function LoginPage(): React.JSX.Element {
   if (username) return <Navigate to="/" replace />
 
   /** MFA 通过（服务端已签发 cookie）后收尾 */
-  const finishLogin = (me: { username: string }): void => {
-    setLoggedIn(me.username)
+  const finishLogin = (me: { username: string; role: UserRole }): void => {
+    setLoggedIn(me.username, me.role)
     navigate('/', { replace: true })
   }
 
@@ -104,7 +104,7 @@ export function LoginPage(): React.JSX.Element {
     setLoading(true)
     try {
       finishLogin(
-        await api.post<{ username: string }>('/api/auth/mfa/confirm', {
+        await api.post<{ username: string; role: UserRole }>('/api/auth/mfa/confirm', {
           username: account,
           token: mfaCode
         })
@@ -123,7 +123,7 @@ export function LoginPage(): React.JSX.Element {
     setLoading(true)
     try {
       finishLogin(
-        await api.post<{ username: string }>('/api/auth/mfa/verify', {
+        await api.post<{ username: string; role: UserRole }>('/api/auth/mfa/verify', {
           username: account,
           token: mfaCode
         })

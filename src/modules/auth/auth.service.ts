@@ -4,6 +4,7 @@ import { log } from '@/core/logger'
 import { db } from '@/db'
 import { env } from '@/env'
 import { authRepository } from './auth.repository'
+import type { UserRole } from './auth.table'
 import { decryptSecret, encryptSecret } from './secret-cipher'
 import { soapVerifyLogin } from './soap'
 import { buildOtpAuthUrl, generateSecret, verifyTotp } from './totp'
@@ -67,6 +68,23 @@ async function verifyPassword(username: string, password: string, ip: string): P
   }
 }
 
+/**
+ * 登录成功统一出口的角色解析：白名单用户提升为 admin 并落库（幂等，仅提升不降级——
+ * 名单移除后已提升的 admin 保持）；currentRole 供调用方传入已查出的角色避免重复查询。
+ */
+async function roleAfterLogin(username: string, currentRole?: UserRole): Promise<UserRole> {
+  if (env.AUTH_ADMIN_USERS.includes(username)) {
+    if (currentRole !== 'admin') {
+      await authRepository.promoteToAdmin(db, username)
+      log().info({ username }, '白名单用户已提升为 admin')
+    }
+    return 'admin'
+  }
+  if (currentRole) return currentRole
+  const user = await authRepository.findByUsername(db, username)
+  return user?.role ?? 'user'
+}
+
 export const authService = {
   /** 登录第一步：SOAP 验密（含限流）。通过不签发 token，恒需 MFA 二次验证 */
   async login(
@@ -107,7 +125,10 @@ export const authService = {
   },
 
   /** 首次绑定确认：验 pending secret 动态码 -> 持久化（AES 密文）+ 签发 JWT */
-  async mfaConfirm(input: { username: string; token: string }): Promise<string> {
+  async mfaConfirm(input: { username: string; token: string }): Promise<{
+    username: string
+    role: UserRole
+  }> {
     const secret = takePending(input.username)
     if (!secret) {
       throw new AppError('MFA_PENDING_EXPIRED')
@@ -124,11 +145,14 @@ export const authService = {
     await authRepository.touchLastLogin(db, input.username)
     pendingStore.delete(input.username)
     log().info({ username: input.username }, 'MFA 绑定成功')
-    return input.username
+    return { username: input.username, role: await roleAfterLogin(input.username) }
   },
 
   /** 已绑定登录验证：验持久化 secret 动态码（含防重放）-> 签发 JWT */
-  async mfaVerify(input: { username: string; token: string }): Promise<string> {
+  async mfaVerify(input: { username: string; token: string }): Promise<{
+    username: string
+    role: UserRole
+  }> {
     const user = await authRepository.findByUsername(db, input.username)
     if (!user?.mfaSecretEnc) {
       throw new AppError('MFA_NOT_BOUND')
@@ -148,7 +172,7 @@ export const authService = {
     }
     await authRepository.updateTotpCounter(db, input.username, counter)
     await authRepository.touchLastLogin(db, input.username)
-    return input.username
+    return { username: input.username, role: await roleAfterLogin(input.username, user.role) }
   },
 
   /** 解绑：重验密码（必须）；提供了动态码则一并校验（管理页），未提供走「手机丢失重置」路径 */

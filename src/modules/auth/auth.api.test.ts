@@ -29,18 +29,19 @@ describe.skipIf(!dbReady)('auth API（集成测试）', () => {
     expect(body.error.traceId).toBeTruthy()
   })
 
-  test('GET /api/auth/me 携带合法 cookie 返回 username', async () => {
-    const token = signToken('it-test-user')
+  test('GET /api/auth/me 携带合法 cookie 返回 username 与 role', async () => {
+    const token = signToken('it-test-user', 'admin')
     const res = await app.request('/api/auth/me', {
       headers: { cookie: `token=${token}` },
     })
-    const body = (await res.json()) as { data: { username: string } }
+    const body = (await res.json()) as { data: { username: string; role: string } }
     expect(res.status).toBe(200)
     expect(body.data.username).toBe('it-test-user')
+    expect(body.data.role).toBe('admin')
   })
 
   test('POST /api/auth/logout 后同 token 访问 me 返回 401（黑名单闭环）', async () => {
-    const token = signToken('it-test-user')
+    const token = signToken('it-test-user', 'user')
     const cookie = { cookie: `token=${token}`, ...JSON_HEADER }
 
     const logoutRes = await app.request('/api/auth/logout', { method: 'POST', headers: cookie })

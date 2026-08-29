@@ -111,13 +111,6 @@ export interface ContextUsage {
   isAutoCompactEnabled?: boolean
 }
 
-export interface ModelInfo {
-  value: string
-  displayName: string
-  description: string
-  supportsEffort?: boolean
-}
-
 export interface Usage {
   inputTokens: number
   outputTokens: number
@@ -193,6 +186,10 @@ export interface SanitizedSession {
   cwd: string
   fileSize: number
   createdAt: number
+  /** 会话当前存活（registry 有活跃进程）；JSONL 历史层恒 false，由 service 注入真实值 */
+  live: boolean
+  /** 会话绑定的智能体名快照（无绑定则缺省 = 标准 Claude）；由 service 注入 */
+  personaName?: string
 }
 
 /** 会话事件带 seq 后的线上格式（SSE data 字段 JSON，event 与 data 保持联合关联） */

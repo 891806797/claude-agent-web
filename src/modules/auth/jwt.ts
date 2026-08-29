@@ -10,6 +10,8 @@ import { env } from '@/env'
 
 export interface JwtPayload {
   username: string
+  /** 角色（role 字段加入前的旧 token 无此字段，读取时按 'user' 处理） */
+  role?: 'admin' | 'user'
   /** 过期时间戳（秒） */
   exp: number
   /** 签发唯一 ID（登出黑名单键） */
@@ -27,12 +29,12 @@ function hmacSign(data: string): string {
   return createHmac('sha256', env.AUTH_JWT_SECRET).update(data).digest('base64url')
 }
 
-/** 签发 JWT（username + jti + 7 天过期） */
-export function signToken(username: string): string {
+/** 签发 JWT（username + role + jti + 7 天过期） */
+export function signToken(username: string, role: 'admin' | 'user'): string {
   const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))
   const now = Math.floor(Date.now() / 1000)
   const payload = base64url(
-    JSON.stringify({ username, exp: now + EXPIRES_SECONDS, jti: randomUUID() }),
+    JSON.stringify({ username, role, exp: now + EXPIRES_SECONDS, jti: randomUUID() }),
   )
   const data = `${header}.${payload}`
   return `${data}.${hmacSign(data)}`
@@ -68,6 +70,12 @@ function decodePayload(token: string): JwtPayload | null {
   } catch {
     return null
   }
+}
+
+/** 从已验签 token（requireAuth 通过后的请求内使用）取角色；旧 token 无 role 视为 user */
+export function roleFromToken(token: string): 'admin' | 'user' {
+  const payload = decodePayload(token)
+  return payload?.role ?? 'user'
 }
 
 /** 验证签名 + 过期 + 黑名单；通过返回 username */

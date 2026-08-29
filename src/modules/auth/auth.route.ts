@@ -14,10 +14,9 @@ import {
   MfaStatusDto,
   MfaTokenInput,
   MfaUnbindInput,
-  UserDto,
 } from './auth.schema'
 import { authService } from './auth.service'
-import { revokeToken, signToken } from './jwt'
+import { revokeToken, roleFromToken, signToken } from './jwt'
 
 /**
  * auth 路由层 -- handler 只做三件事：c.req.valid() -> service -> ok()。
@@ -158,31 +157,6 @@ const meRoute = createRoute({
   },
 })
 
-const listUsersRoute = createRoute({
-  method: 'get',
-  path: '/users',
-  tags: ['auth-admin'],
-  summary: '用户列表（管理页；不含密码/secret）',
-  middleware: [requireAuth()],
-  responses: {
-    200: jsonResponse(ApiResponseSchema(z.array(UserDto)), '成功'),
-    401: jsonResponse(ErrorResponseSchema, '未登录'),
-  },
-})
-
-const resetUserMfaRoute = createRoute({
-  method: 'post',
-  path: '/users/{username}/reset-mfa',
-  tags: ['auth-admin'],
-  summary: '管理员重置用户 MFA（清绑定，用户需重新绑定）',
-  request: { params: z.object({ username: z.string().min(1).max(64) }) },
-  middleware: [requireAuth()],
-  responses: {
-    204: { description: '已重置' },
-    404: jsonResponse(ErrorResponseSchema, '用户不存在'),
-  },
-})
-
 export function registerAuthRoutes(app: App): void {
   app.openapi(loginRoute, async (c) => {
     const input = c.req.valid('json')
@@ -199,15 +173,15 @@ export function registerAuthRoutes(app: App): void {
   })
 
   app.openapi(mfaConfirmRoute, async (c) => {
-    const username = await authService.mfaConfirm(c.req.valid('json'))
-    setAuthCookie(c, signToken(username))
-    return ok(c, { username })
+    const { username, role } = await authService.mfaConfirm(c.req.valid('json'))
+    setAuthCookie(c, signToken(username, role))
+    return ok(c, { username, role })
   })
 
   app.openapi(mfaVerifyRoute, async (c) => {
-    const username = await authService.mfaVerify(c.req.valid('json'))
-    setAuthCookie(c, signToken(username))
-    return ok(c, { username })
+    const { username, role } = await authService.mfaVerify(c.req.valid('json'))
+    setAuthCookie(c, signToken(username, role))
+    return ok(c, { username, role })
   })
 
   app.openapi(mfaUnbindRoute, async (c) => {
@@ -229,15 +203,8 @@ export function registerAuthRoutes(app: App): void {
   })
 
   app.openapi(meRoute, (c) => {
-    return ok(c, { username: c.get('username') })
-  })
-
-  app.openapi(listUsersRoute, async (c) => {
-    return ok(c, await authService.listUsers())
-  })
-
-  app.openapi(resetUserMfaRoute, async (c) => {
-    await authService.resetUserMfa(c.req.valid('param').username)
-    return c.body(null, 204)
+    // role 取自已验签 token（requireAuth 已通过）；role 字段之前的旧 token 按 user 处理
+    const token = getCookie(c, AUTH_COOKIE)
+    return ok(c, { username: c.get('username'), role: token ? roleFromToken(token) : 'user' })
   })
 }

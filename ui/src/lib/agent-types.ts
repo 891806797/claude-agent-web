@@ -83,6 +83,14 @@ export interface PendingApproval {
   expiresAt: number
 }
 
+/** 审批卡片入参形状（PermissionRequest 组件只读 toolName/input，与 PendingApproval 兼容） */
+export type ApprovalRequest = PendingApproval
+
+/** composer 附件：@file 引用（随文本下发）或图片（dataURL） */
+export type Attachment =
+  | { type: 'file'; path: string }
+  | { type: 'image'; dataUrl: string; mime: string; filename?: string }
+
 /** SSE 事件（与后端 SSEEvent 同构；带 seq 后为线上格式） */
 export type SSEEvent =
   | { event: 'session'; data: { sessionId: string } }
@@ -139,13 +147,6 @@ export interface SlashCommand {
   aliases?: string[]
 }
 
-export interface ModelInfo {
-  value: string
-  displayName: string
-  description: string
-  supportsEffort?: boolean
-}
-
 export interface ContextUsage {
   categories: { name: string; tokens: number; color: string; isDeferred?: boolean }[]
   totalTokens: number
@@ -162,6 +163,16 @@ export interface Project {
   createdAt: string
 }
 
+/** 智能体定义（可复用人格；systemPrompt 追加注入会话） */
+export interface Persona {
+  id: string
+  name: string
+  description: string
+  systemPrompt: string
+  createdAt: string
+  updatedAt: string
+}
+
 export interface SessionSummary {
   id: string
   summary: string
@@ -171,6 +182,10 @@ export interface SessionSummary {
   cwd: string
   fileSize: number
   createdAt: number
+  /** 会话当前存活（有活跃进程） */
+  live: boolean
+  /** 会话绑定的智能体名快照（无绑定则缺省 = 标准 Claude） */
+  personaName?: string
 }
 
 export interface ActiveSession {
@@ -178,6 +193,12 @@ export interface ActiveSession {
   state: 'starting' | 'idle' | 'turn-running' | 'closing' | 'closed'
   startedAt: number
   turns: number
+  /** 会话绑定的智能体 id（绑定快照事实源；无绑定则缺省 = 标准 Claude） */
+  personaId?: string
+  /** 绑定名快照（persona 事后增删改不影响此值） */
+  personaName?: string
+  /** 会话当前生效的 append 系统提示词（最后切换值；标准 Claude 缺省） */
+  systemPrompt?: string
 }
 
 export interface ActiveSessionResult {

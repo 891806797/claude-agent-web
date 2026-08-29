@@ -1,4 +1,2 @@
-dist
-node_modules
-bun.lock
-components.json
+# 工具运行时状态（非源码）
+.omc

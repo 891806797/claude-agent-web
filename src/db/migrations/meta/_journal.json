@@ -29,6 +29,20 @@
       "when": 1787942480807,
       "tag": "0003_messy_calypso",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787994390452,
+      "tag": "0004_violet_chat",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788017658191,
+      "tag": "0005_rich_juggernaut",
+      "breakpoints": true
     }
   ]
 }

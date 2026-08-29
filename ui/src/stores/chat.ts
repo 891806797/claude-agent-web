@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type {
   AgentStatus,
   ChatMessage,
+  ContextUsage,
   ContentBlock,
   PendingApproval,
   SequencedEvent,
@@ -30,6 +31,14 @@ interface ChatState {
   settled: Record<string, { outcome: string; reason?: string }>
   usage: Usage | null
   closed: { reason: SessionCloseReason } | null
+  /** SDK 上下文压缩进行中（正交于 status，由 compaction 事件驱动；压缩期间输入锁定） */
+  isCompacting: boolean
+  /** 最近一次 context_usage 快照（CostCircle 下拉数据源） */
+  contextUsage: ContextUsage | null
+  /** 当前活跃工具调用（中断按钮数据源）；tool_call_end / turn_end 清空 */
+  activeToolCall: { id: string; name: string } | null
+  /** 最近一次 error 事件消息；发新消息时清空 */
+  lastError: string | null
   /** 最近一次 checkpoint（user message uuid，用于 rewindFiles 回滚） */
   lastCheckpoint: string | null
   /** 活跃子代理进度（按 toolUseId 内联到对应 tool_use block 渲染；done 即移除） */
@@ -64,6 +73,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   settled: {},
   usage: null,
   closed: null,
+  isCompacting: false,
+  contextUsage: null,
+  activeToolCall: null,
+  lastError: null,
   lastCheckpoint: null,
   subagentByToolUse: {},
   toolArgBuf: {},
@@ -79,6 +92,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       settled: {},
       usage: null,
       closed: null,
+      isCompacting: false,
+      contextUsage: null,
+      activeToolCall: null,
+      lastError: null,
       subagentByToolUse: {},
       toolArgBuf: {},
       messageIndex: {},
@@ -105,7 +122,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({
       messages: [...s.messages, { type: 'user', id, content: text }],
       messageIndex: { ...s.messageIndex, [id]: s.messages.length },
-      status: 'thinking' as const
+      status: 'thinking' as const,
+      lastError: null
     }))
     return id
   },
@@ -124,6 +142,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
     if (event === 'usage') {
       set({ usage: data as Usage })
+      return
+    }
+    if (event === 'context_usage') {
+      set({ contextUsage: (data as { context: ContextUsage }).context })
+      return
+    }
+    if (event === 'compaction') {
+      const d = data as { phase: 'start' | 'end'; trigger?: 'manual' | 'auto'; preTokens?: number }
+      if (d.phase === 'start') {
+        set({ isCompacting: true })
+        return
+      }
+      // end：解除压缩态并插入分割线（后续消息在压缩后的新上下文中产生）
+      const id = `compaction-${crypto.randomUUID()}`
+      set((st) => ({
+        isCompacting: false,
+        messages: [
+          ...st.messages,
+          { type: 'compaction', id, trigger: d.trigger ?? 'manual', preTokens: d.preTokens ?? 0 }
+        ],
+        messageIndex: { ...st.messageIndex, [id]: st.messages.length }
+      }))
       return
     }
     if (event === 'checkpoint') {
@@ -167,17 +207,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return
     }
     if (event === 'turn_end') {
-      set({ status: 'idle' })
+      set({ status: 'idle', activeToolCall: null })
       return
     }
     if (event === 'error') {
       set({ status: 'error' })
+      const message = (data as { message: string }).message
       const id = `err-${crypto.randomUUID()}`
       set((st) => ({
-        messages: [
-          ...st.messages,
-          { type: 'system', id, content: (data as { message: string }).message, level: 'error' }
-        ],
+        lastError: message,
+        messages: [...st.messages, { type: 'system', id, content: message, level: 'error' }],
         messageIndex: { ...st.messageIndex, [id]: st.messages.length }
       }))
       return
@@ -191,6 +230,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     if (event === 'message_start') {
       const id = (data as { messageId: string }).messageId
+      // 幂等兜底：缓冲重放/重连场景下已存在的消息头不再重复 append（key 冲突防护）
+      if (messageIndex[id] !== undefined) return
       const msg: ChatMessage = { type: 'assistant', id, content: [] }
       set({
         messages: [...messages, msg],
@@ -233,6 +274,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({
         messages: next,
         toolUsePos: { ...toolUsePos, [d.toolCallId]: { msgIdx: mi, blockIdx } },
+        activeToolCall: { id: d.toolCallId, name: d.name },
         status: 'tool-use'
       })
       return
@@ -304,7 +346,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ...msg.content.slice(pos.blockIdx + 1)
         ]
       }
-      set({ messages: next })
+      set({
+        messages: next,
+        // 工具执行完成（含失败）：清中断按钮数据源（interrupt 在长工具运行期间保持可用）
+        ...(s.activeToolCall?.id === d.toolCallId ? { activeToolCall: null } : {})
+      })
       return
     }
 

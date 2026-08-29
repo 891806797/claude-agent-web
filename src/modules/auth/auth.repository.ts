@@ -75,6 +75,11 @@ export const authRepository = {
       .where(eq(users.username, username))
   },
 
+  /** 白名单提升：置为 admin（幂等；仅 user -> admin 单向，本期无降级路径） */
+  async promoteToAdmin(executor: DbExecutor, username: string): Promise<void> {
+    await executor.update(users).set({ role: 'admin' }).where(eq(users.username, username))
+  },
+
   async recordAttempt(
     executor: DbExecutor,
     data: { username: string; ip: string; success: boolean },

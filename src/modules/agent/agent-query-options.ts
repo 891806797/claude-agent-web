@@ -22,8 +22,9 @@ export interface SessionQueryParams {
   cwd: string
   /** 新会话预设 session id（CLI 2.x 首条用户消息前不发 init，预设 id 使 openSession 免等握手） */
   sessionId?: string
-  model?: string
   resume?: string
+  /** 追加到 claude_code 预设后的系统提示词（persona 注入；缺省 = 标准 Claude） */
+  appendSystemPrompt?: string
   abortController: AbortController
   canUseTool: CanUseToolFn
   sessionLogger: Logger
@@ -36,7 +37,17 @@ export function buildSessionQueryOptions(params: SessionQueryParams): Options {
     abortController: params.abortController,
     ...(params.sessionId ? { sessionId: params.sessionId } : {}),
     ...(params.resume ? { resume: params.resume } : {}),
-    ...(params.model ? { model: params.model } : {}),
+    // persona：append 到 claude_code 预设后（保留完整工具规范/代码能力，仅追加自定义人格），
+    // 覆盖 baseOptions 的无 append 形态；probe 探测不经此路径
+    ...(params.appendSystemPrompt
+      ? {
+          systemPrompt: {
+            type: 'preset',
+            preset: 'claude_code',
+            append: params.appendSystemPrompt,
+          } satisfies NonNullable<Options['systemPrompt']>,
+        }
+      : {}),
     permissionMode: 'default',
     canUseTool: params.canUseTool,
   }
@@ -48,7 +59,7 @@ export interface ProbeQueryParams {
   sessionLogger: Logger
 }
 
-/** 零 token 探测 options（supportedCommands/supportedModels 预取，无 canUseTool） */
+/** 零 token 探测 options（supportedCommands 预取，无 canUseTool） */
 export function buildProbeQueryOptions(params: ProbeQueryParams): Options {
   return baseOptions(params.username, params.cwd, params.sessionLogger)
 }

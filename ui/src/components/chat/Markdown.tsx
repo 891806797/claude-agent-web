@@ -1,73 +1,215 @@
-import remarkGfm from 'remark-gfm'
-import ReactMarkdown from 'react-markdown'
-import { cn } from '@/lib/utils'
-
 /**
- * 消息 Markdown 渲染 —— react-markdown + remark-gfm。
- * 不引入 @tailwind/typography（额外依赖），用 components 映射到语义 token 工具类，
- * 与 shadcn 主题一致（代码块 bg-muted、链接 text-primary、列表/标题常规）。
- * 流式安全：文本增量到达时整段重渲染，无副作用。
+ * Markdown 渲染组件 — 用 react-markdown + remark-gfm 将 AI 回复的 markdown 文本转为 React 组件树。
+ *
+ * 严格对齐 claude-code 的视觉风格：
+ * - 代码块：深色背景 + 圆角，不显示语言标签（language 仅供语法高亮用）
+ * - 行内代码：深绿色（permission 主题色）
+ * - 引用块：▎ 符号前缀 + 斜体，文字保持正常亮度
+ * - 标题：H1 bold+italic+underline，H2 bold，H3+ bold
+ * - 删除线：弱化（模型常用 ~ 表示"大约"）
+ * - Thinking：淡色（dim）渲染
+ *
+ * 流式性能护栏（始终 Markdown，不降级纯文本）：
+ * - memo：历史消息文本不变 → 不重复 parse markdown，流式仅末尾消息重渲染
+ * - useDeferredValue：流式中把 parse 让到低优先级 lane，输入/滚动等紧急更新先行
  */
-export function Markdown({ children, className }: { children: string; className?: string }) {
-  return (
-    <div className={cn('text-sm leading-relaxed text-foreground', className)}>
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
-          h1: ({ children }) => <h1 className="mb-2 mt-3 text-base font-semibold">{children}</h1>,
-          h2: ({ children }) => <h2 className="mb-2 mt-3 text-sm font-semibold">{children}</h2>,
-          h3: ({ children }) => <h3 className="mb-1 mt-2 text-sm font-semibold">{children}</h3>,
-          ul: ({ children }) => <ul className="mb-2 ml-4 list-disc space-y-0.5">{children}</ul>,
-          ol: ({ children }) => <ol className="mb-2 ml-4 list-decimal space-y-0.5">{children}</ol>,
-          li: ({ children }) => <li className="leading-relaxed">{children}</li>,
-          a: ({ children, href }) => (
-            <a
-              href={href}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-primary underline-offset-2 hover:underline"
-            >
-              {children}
-            </a>
-          ),
-          strong: ({ children }) => (
-            <strong className="font-semibold text-foreground">{children}</strong>
-          ),
-          em: ({ children }) => <em className="italic">{children}</em>,
-          code: ({ className: cls, children }) => {
-            const isBlock = /language-/.test(cls ?? '')
-            if (isBlock) {
-              return (
-                <code className="block overflow-x-auto rounded bg-muted p-2 font-mono text-[12px] text-foreground">
-                  {children}
-                </code>
-              )
-            }
-            return (
-              <code className="rounded bg-muted px-1 py-0.5 font-mono text-[12px] text-foreground">
-                {children}
-              </code>
-            )
-          },
-          pre: ({ children }) => <pre className="mb-2">{children}</pre>,
-          blockquote: ({ children }) => (
-            <blockquote className="mb-2 border-l-2 border-border pl-3 text-muted-foreground">
-              {children}
-            </blockquote>
-          ),
-          table: ({ children }) => (
-            <table className="mb-2 w-full border-collapse text-[12px]">{children}</table>
-          ),
-          th: ({ children }) => (
-            <th className="border border-border px-2 py-1 text-left font-medium">{children}</th>
-          ),
-          td: ({ children }) => <td className="border border-border px-2 py-1">{children}</td>,
-          hr: () => <hr className="my-2 border-border" />
-        }}
+
+import { memo, useDeferredValue } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import type { Components } from 'react-markdown'
+
+interface MarkdownProps {
+  children: string
+  /** Thinking 块等淡色场景 */
+  dimColor?: boolean
+  /** 流式输出中：可延迟渲染（滞后一两帧无感），仍走 Markdown */
+  isStreaming?: boolean
+}
+
+// ── 颜色 ──
+
+const textColor = (dim?: boolean) => (dim ? 'text-[var(--text-faint)]' : 'text-[var(--text-base)]')
+
+/** claude-code 行内代码颜色 — 深绿色 */
+const INLINE_CODE_COLOR = 'text-[#1a7f37]'
+
+// ── 组件映射 ──
+
+const components: Components = {
+  // ── 标题：H1 = bold+italic+underline, H2+ = bold ──
+  h1: ({ children }) => (
+    <h1 className={`text-[18px] font-bold italic underline mt-4 mb-2 ${textColor()}`}>
+      {children}
+    </h1>
+  ),
+  h2: ({ children }) => (
+    <h2 className={`text-[16px] font-bold mt-3 mb-1.5 ${textColor()}`}>{children}</h2>
+  ),
+  h3: ({ children }) => (
+    <h3 className={`text-[15px] font-bold mt-2 mb-1 ${textColor()}`}>{children}</h3>
+  ),
+  h4: ({ children }) => (
+    <h4 className={`text-[15px] font-bold mt-2 mb-1 ${textColor()}`}>{children}</h4>
+  ),
+  h5: ({ children }) => (
+    <h5 className={`text-[14px] font-bold mt-1.5 mb-0.5 ${textColor()}`}>{children}</h5>
+  ),
+  h6: ({ children }) => (
+    <h6 className={`text-[14px] font-bold mt-1.5 mb-0.5 ${textColor()}`}>{children}</h6>
+  ),
+
+  p: ({ children }) => (
+    <p className={`text-[15px] leading-relaxed my-1 ${textColor()}`}>{children}</p>
+  ),
+
+  // ── 列表 ──
+  ul: ({ children }) => (
+    <ul className={`list-disc pl-5 my-1.5 space-y-0.5 ${textColor()}`}>{children}</ul>
+  ),
+  ol: ({ children }) => (
+    <ol className={`list-decimal pl-5 my-1.5 space-y-0.5 ${textColor()}`}>{children}</ol>
+  ),
+  li: ({ children }) => (
+    <li className={`text-[15px] leading-relaxed pl-1 ${textColor()}`}>{children}</li>
+  ),
+
+  // ── 引用块：▎ 前缀 + 斜体（对齐 claude-code BLOCKQUOTE_BAR = ▎）──
+  blockquote: ({ children }) => (
+    <blockquote className="my-2 italic text-[var(--text-muted)]">
+      <span className="not-italic text-[var(--text-faint)] select-none mr-1">▎</span>
+      {children}
+    </blockquote>
+  ),
+
+  hr: () => <hr className="my-3 border-[var(--border-muted)]" />,
+
+  strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+  em: ({ children }) => <em className="italic">{children}</em>,
+
+  // 删除线 — remark-gfm 默认启用，但模型常用 ~ 表示"大约"，弱化样式避免误读
+  del: ({ children }) => <del className="line-through opacity-60">{children}</del>,
+
+  // ── 链接 — 深绿色 ──
+  a: ({ href, children }) => (
+    <a
+      href={href}
+      className="text-[#1a7f37] hover:text-[#2ea043] underline underline-offset-2"
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      {children}
+    </a>
+  ),
+
+  // ── 围栏代码块 — 不显示语言标签（claude-code 只用来选高亮器）──
+  pre: ({ children }) => (
+    <pre className="my-2 text-[13px] leading-relaxed whitespace-pre-wrap font-mono bg-[var(--bg-layer-01)] p-3 rounded-lg border border-[var(--border-muted)] overflow-x-auto">
+      {children}
+    </pre>
+  ),
+
+  // code：行内 vs 围栏块内
+  code: ({ className, children, ...props }) => {
+    const isBlock = className?.startsWith('language-')
+    if (isBlock) {
+      // 围栏代码块内的 code — 不显示语言标签，仅语法高亮用
+      return (
+        <code className={className} {...props}>
+          {children}
+        </code>
+      )
+    }
+    // 行内 code — 深绿色（claude-code permission 主题色）
+    return (
+      <code
+        className={`text-[13px] font-mono bg-[var(--bg-layer-01)] px-1.5 py-0.5 rounded ${INLINE_CODE_COLOR}`}
       >
         {children}
-      </ReactMarkdown>
+      </code>
+    )
+  },
+
+  // ── 表格 ──
+  table: ({ children }) => (
+    <div className="my-2 overflow-x-auto">
+      <table className="min-w-full text-[13px] border border-[var(--border-muted)] rounded">
+        {children}
+      </table>
     </div>
+  ),
+  thead: ({ children }) => <thead className="bg-[var(--bg-layer-01)]">{children}</thead>,
+  tbody: ({ children }) => <tbody>{children}</tbody>,
+  tr: ({ children }) => <tr className="border-b border-[var(--border-muted)]">{children}</tr>,
+  th: ({ children }) => (
+    <th className={`px-3 py-1.5 text-left font-semibold ${textColor()}`}>{children}</th>
+  ),
+  td: ({ children }) => <td className={`px-3 py-1.5 ${textColor()}`}>{children}</td>,
+
+  img: ({ src, alt }) => <img src={src} alt={alt ?? ''} className="max-w-full rounded my-2" />
+}
+
+/** dim 色组件变体（Thinking 块内用） */
+const dimComponents: Components = {
+  ...components,
+  h1: ({ children }) => (
+    <h1 className={`text-[14px] font-bold italic underline mt-2 mb-1 ${textColor(true)}`}>
+      {children}
+    </h1>
+  ),
+  h2: ({ children }) => (
+    <h2 className={`text-[13px] font-bold mt-1.5 mb-0.5 ${textColor(true)}`}>{children}</h2>
+  ),
+  h3: ({ children }) => (
+    <h3 className={`text-[12px] font-bold mt-1 mb-0.5 ${textColor(true)}`}>{children}</h3>
+  ),
+  p: ({ children }) => (
+    <p className={`text-[12px] leading-relaxed my-0.5 ${textColor(true)}`}>{children}</p>
+  ),
+  li: ({ children }) => (
+    <li className={`text-[12px] leading-relaxed pl-1 ${textColor(true)}`}>{children}</li>
+  ),
+  pre: ({ children }) => (
+    <pre className="my-1 text-[11px] leading-relaxed whitespace-pre-wrap font-mono bg-[var(--bg-layer-01)] p-2 rounded border border-[var(--border-muted)] overflow-x-auto">
+      {children}
+    </pre>
+  ),
+  code: ({ className, children, ...props }) => {
+    const isBlock = className?.startsWith('language-')
+    if (isBlock)
+      return (
+        <code className={className} {...props}>
+          {children}
+        </code>
+      )
+    return (
+      <code className="text-[11px] font-mono bg-[var(--bg-layer-01)] px-1 py-0.5 rounded text-[var(--text-faint)]">
+        {children}
+      </code>
+    )
+  },
+  // dim 引用块
+  blockquote: ({ children }) => (
+    <blockquote className="my-1 italic text-[var(--text-faint)]">
+      <span className="not-italic text-[var(--text-faint)] select-none mr-1">▎</span>
+      {children}
+    </blockquote>
   )
 }
+
+// memo：children(text) 与 dimColor 均为值类型，浅比较即可。
+// 流式时只有正在输出的那条消息文本在变，历史消息文本不变 → 不再重复 parse markdown。
+export const Markdown = memo(function Markdown({
+  children,
+  dimColor,
+  isStreaming
+}: MarkdownProps): React.JSX.Element {
+  // 流式中延迟一帧渲染：ReactMarkdown parse 让位给输入/滚动等紧急更新，肉眼无感
+  const deferred = useDeferredValue(children)
+  const text = isStreaming ? deferred : children
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={dimColor ? dimComponents : components}>
+      {text}
+    </ReactMarkdown>
+  )
+})

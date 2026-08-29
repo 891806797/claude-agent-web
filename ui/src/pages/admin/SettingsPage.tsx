@@ -6,16 +6,16 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input'
 import { toast } from '@/components/ui/sonner'
 import { useAuthStore } from '@/stores/auth'
-import { authApi, type UserSummary } from '@/lib/auth-api'
+import { adminApi, type UserSummary } from '@/lib/admin-api'
 import { agentApi, ApiError } from '@/lib/agent-api'
 import { api } from '@/lib/api'
 import type { Project } from '@/lib/agent-types'
 
 /**
- * 管理页 —— 项目目录白名单管理（CRUD）+ 用户列表/重置 MFA + 当前用户 MFA 状态/解绑。
+ * 设置页 —— 项目目录白名单管理（CRUD）+ 用户列表/重置 MFA + 当前用户 MFA 状态/解绑。
  * 所有登录用户均可管理（决策 #25，内部工具，无角色分层）。
  */
-export function AdminPage(): React.JSX.Element {
+export function SettingsPage(): React.JSX.Element {
   const username = useAuthStore((s) => s.username)
   const [projects, setProjects] = useState<Project[]>([])
   const [mfaBound, setMfaBound] = useState<boolean | null>(null)
@@ -26,7 +26,7 @@ export function AdminPage(): React.JSX.Element {
       .listProjects()
       .then(setProjects)
       .catch(() => toast.error('加载项目列表失败'))
-    authApi
+    adminApi
       .listUsers()
       .then(setUsers)
       .catch(() => toast.error('加载用户列表失败'))
@@ -41,17 +41,7 @@ export function AdminPage(): React.JSX.Element {
   useEffect(refresh, [username])
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 bg-background p-6">
-      <header className="flex items-center gap-3">
-        <h1 className="text-xl font-semibold text-foreground">管理</h1>
-        <a href="/chat" className="text-sm text-primary hover:underline">
-          返回聊天
-        </a>
-        <a href="/dashboard" className="text-sm text-primary hover:underline">
-          看板
-        </a>
-      </header>
-
+    <main className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-4 md:p-6">
       <ProjectSection projects={projects} onChanged={refresh} />
       <UserSection users={users} onChanged={refresh} />
       <MfaSection bound={mfaBound} username={username} onChanged={refresh} />
@@ -179,7 +169,7 @@ function UserSection({
   const resetMfa = async (u: string): Promise<void> => {
     setResetting(u)
     try {
-      await authApi.resetUserMfa(u)
+      await adminApi.resetUserMfa(u)
       toast.success(`已重置 ${u} 的 MFA`)
       onChanged()
     } catch (err) {

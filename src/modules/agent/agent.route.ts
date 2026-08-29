@@ -7,10 +7,11 @@ import {
   ActiveSessionResult,
   ApprovalInput,
   ChatMessageDto,
+  CreatePersonaInput,
   CreateProjectInput,
-  ModelInfoDto,
   OpenSessionInput,
   OpenSessionResult,
+  PersonaDto,
   ProjectDto,
   RenameSessionInput,
   RewindInput,
@@ -19,7 +20,8 @@ import {
   SessionHeaders,
   SessionSummaryDto,
   SlashCommandDto,
-  StatsDto,
+  SwitchPersonaInput,
+  UpdatePersonaInput,
 } from './agent.schema'
 import { agentService, requireSessionCtx } from './agent.service'
 import { decodeDir, normalizeDir } from './paths'
@@ -242,6 +244,77 @@ const rewindRoute = createRoute({
   },
 })
 
+// ===== 智能体定义 =====
+
+const listPersonasRoute = createRoute({
+  method: 'get',
+  path: '/personas',
+  tags: ['agent-persona'],
+  summary: '智能体定义列表（全局；输入框选择器与管理页共用）',
+  responses: {
+    200: jsonResponse(ApiResponseSchema(z.array(PersonaDto)), '成功'),
+  },
+})
+
+const createPersonaRoute = createRoute({
+  method: 'post',
+  path: '/personas',
+  tags: ['agent-persona'],
+  summary: '新建智能体（name 唯一；systemPrompt 原文追加到 claude_code 预设后）',
+  request: {
+    body: { required: true, content: { 'application/json': { schema: CreatePersonaInput } } },
+  },
+  responses: {
+    201: jsonResponse(ApiResponseSchema(PersonaDto), '已创建'),
+    409: jsonResponse(ErrorResponseSchema, '名称已存在'),
+    422: jsonResponse(ErrorResponseSchema, '参数错误'),
+  },
+})
+
+const updatePersonaRoute = createRoute({
+  method: 'put',
+  path: '/personas/{id}',
+  tags: ['agent-persona'],
+  summary: '更新智能体（仅影响之后的新会话；已开会话注入快照不受影响）',
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+    body: { required: true, content: { 'application/json': { schema: UpdatePersonaInput } } },
+  },
+  responses: {
+    200: jsonResponse(ApiResponseSchema(PersonaDto), '成功'),
+    404: jsonResponse(ErrorResponseSchema, '智能体不存在'),
+    409: jsonResponse(ErrorResponseSchema, '名称已存在'),
+  },
+})
+
+const removePersonaRoute = createRoute({
+  method: 'delete',
+  path: '/personas/{id}',
+  tags: ['agent-persona'],
+  summary: '删除智能体（会话绑定存快照，历史会话 resume 不受影响）',
+  request: { params: z.object({ id: z.string().uuid() }) },
+  responses: {
+    204: NoContent,
+    404: jsonResponse(ErrorResponseSchema, '智能体不存在'),
+  },
+})
+
+const switchPersonaRoute = createRoute({
+  method: 'put',
+  path: '/session/persona',
+  tags: ['agent-session'],
+  summary: '切换会话智能体（仅 idle 可切；evict 替换进程，同 sid resume 历史重放）',
+  request: {
+    headers: SessionHeaders,
+    body: { required: true, content: { 'application/json': { schema: SwitchPersonaInput } } },
+  },
+  responses: {
+    200: jsonResponse(ApiResponseSchema(OpenSessionResult), '已切换（进程已替换）'),
+    404: jsonResponse(ErrorResponseSchema, '会话不存在 / 智能体不存在'),
+    409: jsonResponse(ErrorResponseSchema, '会话忙碌（思考/审批中）'),
+  },
+})
+
 // ===== 探测（零 token）=====
 
 const commandsRoute = createRoute({
@@ -252,18 +325,6 @@ const commandsRoute = createRoute({
   request: { query: z.object({ projectId: z.string().uuid() }) },
   responses: {
     200: jsonResponse(ApiResponseSchema(z.array(SlashCommandDto)), '成功'),
-    404: jsonResponse(ErrorResponseSchema, '项目不存在'),
-  },
-})
-
-const modelsRoute = createRoute({
-  method: 'get',
-  path: '/models',
-  tags: ['agent-probe'],
-  summary: '模型列表（零 token 探测，按用户+项目缓存）',
-  request: { query: z.object({ projectId: z.string().uuid() }) },
-  responses: {
-    200: jsonResponse(ApiResponseSchema(z.array(ModelInfoDto)), '成功'),
     404: jsonResponse(ErrorResponseSchema, '项目不存在'),
   },
 })
@@ -279,16 +340,6 @@ const filesRoute = createRoute({
   responses: {
     200: jsonResponse(ApiResponseSchema(z.array(z.string())), '成功'),
     404: jsonResponse(ErrorResponseSchema, '项目不存在'),
-  },
-})
-
-const statsRoute = createRoute({
-  method: 'get',
-  path: '/stats',
-  tags: ['agent-stats'],
-  summary: '看板统计（活跃会话/在线用户/token/历史/关闭原因分布）',
-  responses: {
-    200: jsonResponse(ApiResponseSchema(StatsDto), '成功'),
   },
 })
 
@@ -311,6 +362,24 @@ export function registerAgentRoutes(app: App): void {
 
   app.openapi(removeProjectRoute, async (c) => {
     await agentService.removeProject(c.req.valid('param').id)
+    return c.body(null, 204)
+  })
+
+  // ---- 智能体定义 ----
+  app.openapi(listPersonasRoute, async (c) => {
+    return ok(c, await agentService.listPersonas())
+  })
+
+  app.openapi(createPersonaRoute, async (c) => {
+    return created(c, await agentService.createPersona(c.req.valid('json')))
+  })
+
+  app.openapi(updatePersonaRoute, async (c) => {
+    return ok(c, await agentService.updatePersona(c.req.valid('param').id, c.req.valid('json')))
+  })
+
+  app.openapi(removePersonaRoute, async (c) => {
+    await agentService.removePersona(c.req.valid('param').id)
     return c.body(null, 204)
   })
 
@@ -418,22 +487,27 @@ export function registerAgentRoutes(app: App): void {
     return c.body(null, 204)
   })
 
+  app.openapi(switchPersonaRoute, async (c) => {
+    const h = c.req.valid('header')
+    return ok(
+      c,
+      await agentService.switchSessionPersona(
+        c.get('username'),
+        headerWorkspaceDir(h['x-workspace-dir']),
+        h['x-session-id'],
+        c.req.valid('json'),
+      ),
+    )
+  })
+
   // ---- 探测 ----
   app.openapi(commandsRoute, async (c) => {
     return ok(c, await agentService.getCommands(c.get('username'), c.req.valid('query').projectId))
   })
 
-  app.openapi(modelsRoute, async (c) => {
-    return ok(c, await agentService.getModels(c.get('username'), c.req.valid('query').projectId))
-  })
-
   app.openapi(filesRoute, async (c) => {
     const { projectId, q } = c.req.valid('query')
     return ok(c, await agentService.getFiles(projectId, q ?? ''))
-  })
-
-  app.openapi(statsRoute, async (c) => {
-    return ok(c, await agentService.getStats())
   })
 
   // ---- SSE（app.get 例外：无 JSON 响应体）----

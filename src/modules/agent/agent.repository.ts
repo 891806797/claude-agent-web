@@ -1,6 +1,14 @@
-import { count, desc, eq, gte, sum } from 'drizzle-orm'
+import { count, desc, eq, gte, inArray, sum } from 'drizzle-orm'
 import type { DbExecutor } from '@/db'
-import { type AgentProjectRow, agentProjects, agentSessionStats } from './agent.table'
+import {
+  type AgentPersonaRow,
+  type AgentProjectRow,
+  type AgentSessionPersonaRow,
+  agentPersonas,
+  agentProjects,
+  agentSessionPersonas,
+  agentSessionStats,
+} from './agent.table'
 
 /**
  * agent 数据访问层 —— 只关心 SQL，不做业务判断、不抛业务错误，返回原始 Row。
@@ -111,5 +119,104 @@ export const agentRepository = {
   async countProjects(executor: DbExecutor): Promise<number> {
     const [row] = await executor.select({ count: count() }).from(agentProjects)
     return row?.count ?? 0
+  },
+
+  // ===== 智能体定义 =====
+
+  async listPersonas(executor: DbExecutor): Promise<AgentPersonaRow[]> {
+    return executor.select().from(agentPersonas).orderBy(agentPersonas.name)
+  },
+
+  async findPersonaById(executor: DbExecutor, id: string): Promise<AgentPersonaRow | undefined> {
+    const [row] = await executor
+      .select()
+      .from(agentPersonas)
+      .where(eq(agentPersonas.id, id))
+      .limit(1)
+    return row
+  },
+
+  async findPersonaByName(
+    executor: DbExecutor,
+    name: string,
+  ): Promise<AgentPersonaRow | undefined> {
+    const [row] = await executor
+      .select()
+      .from(agentPersonas)
+      .where(eq(agentPersonas.name, name))
+      .limit(1)
+    return row
+  },
+
+  async createPersona(
+    executor: DbExecutor,
+    data: { name: string; description: string; systemPrompt: string },
+  ): Promise<AgentPersonaRow> {
+    const [row] = await executor.insert(agentPersonas).values(data).returning()
+    // insert returning 必返回插入的行
+    return row!
+  },
+
+  async updatePersona(
+    executor: DbExecutor,
+    id: string,
+    data: Partial<{ name: string; description: string; systemPrompt: string }>,
+  ): Promise<AgentPersonaRow | undefined> {
+    const [row] = await executor
+      .update(agentPersonas)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(agentPersonas.id, id))
+      .returning()
+    return row
+  },
+
+  async removePersona(executor: DbExecutor, id: string): Promise<boolean> {
+    const removed = await executor
+      .delete(agentPersonas)
+      .where(eq(agentPersonas.id, id))
+      .returning({ id: agentPersonas.id })
+    return removed.length > 0
+  },
+
+  // ===== 会话-智能体绑定快照 =====
+
+  /** upsert：同 sid 重开（resume/切换）覆盖写（幂等；快照以最后一次生效为准） */
+  async upsertSessionPersona(
+    executor: DbExecutor,
+    data: { sessionId: string; personaId: string; personaName: string; systemPrompt: string },
+  ): Promise<void> {
+    await executor
+      .insert(agentSessionPersonas)
+      .values(data)
+      .onConflictDoUpdate({ target: agentSessionPersonas.sessionId, set: data })
+  },
+
+  /** 切回标准 Claude：删绑定（无绑定 = 标准，列表无 badge、resume 不注入） */
+  async deleteSessionPersona(executor: DbExecutor, sessionId: string): Promise<void> {
+    await executor.delete(agentSessionPersonas).where(eq(agentSessionPersonas.sessionId, sessionId))
+  },
+
+  async findSessionPersona(
+    executor: DbExecutor,
+    sessionId: string,
+  ): Promise<AgentSessionPersonaRow | undefined> {
+    const [row] = await executor
+      .select()
+      .from(agentSessionPersonas)
+      .where(eq(agentSessionPersonas.sessionId, sessionId))
+      .limit(1)
+    return row
+  },
+
+  /** 批量查询（会话列表附 personaName；空数组防 in('') 全表扫） */
+  async findSessionPersonas(
+    executor: DbExecutor,
+    sessionIds: string[],
+  ): Promise<AgentSessionPersonaRow[]> {
+    if (sessionIds.length === 0) return []
+    return executor
+      .select()
+      .from(agentSessionPersonas)
+      .where(inArray(agentSessionPersonas.sessionId, sessionIds))
   },
 }

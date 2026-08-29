@@ -55,20 +55,9 @@ export const MfaUnbindInput = z.object({
 export const MeDto = z
   .object({
     username: z.string().openapi({ example: 'zhangsan' }),
+    role: z.enum(['admin', 'user']).openapi({ example: 'user' }),
   })
   .openapi('Me')
-
-/** 用户档案（管理列表；不含密码/MFA secret） */
-export const UserDto = z
-  .object({
-    username: z.string(),
-    mfaBoundAt: z.iso.datetime().nullable(),
-    lastLoginAt: z.iso.datetime().nullable(),
-    createdAt: z.iso.datetime(),
-  })
-  .openapi('AuthUser')
-
-export type UserSummary = z.infer<typeof UserDto>
 
 export type LoginData = z.infer<typeof LoginInput>
 export type MfaTokenData = z.infer<typeof MfaTokenInput>

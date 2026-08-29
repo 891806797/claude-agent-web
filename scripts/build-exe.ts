@@ -57,6 +57,11 @@ async function main() {
   rmSync(OUT_DIR, { recursive: true, force: true })
 
   say('==> 构建前端（ui -> ui/dist）...')
+  // BASE_URL 同时驱动 vite base（产物引用 /<base>/assets）——运行时后端读取同名变量挂载前缀，
+  // 启动 exe 时须设置同样的 BASE_URL（默认根路径部署则都不设）
+  if (process.env.BASE_URL) {
+    say(`    子路径部署构建：BASE_URL=${process.env.BASE_URL}（启动时须设置相同值）`)
+  }
   await $`cd ${UI_DIR} && bun run build`
   if (!existsSync(`${DIST_DIR}/index.html`)) {
     throw new Error('前端构建产物缺失：ui/dist/index.html')

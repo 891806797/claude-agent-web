@@ -29,6 +29,9 @@ export const ErrorCodes = {
   AGENT_SESSION_CLOSING: { status: 409, message: '会话正在关闭' },
   AGENT_APPROVAL_NOT_FOUND: { status: 409, message: '该审批已被处理' },
   AGENT_SDK_ERROR: { status: 500, message: 'Claude 会话启动失败' },
+  AGENT_PERSONA_NOT_FOUND: { status: 404, message: '智能体不存在' },
+  AGENT_PERSONA_NAME_EXISTS: { status: 409, message: '智能体名称已存在' },
+  AGENT_PERSONA_SWITCH_BUSY: { status: 409, message: '会话忙碌，请在空闲时切换智能体' },
 } as const satisfies Record<string, { status: number; message: string }>
 
 export type ErrorCode = keyof typeof ErrorCodes

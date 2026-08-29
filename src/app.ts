@@ -31,7 +31,26 @@ export function buildApp(): App {
   app.onError(errorHandler)
   app.notFound(notFoundHandler)
 
-  return app
+  // 子路径部署（BASE_URL 如 /claude，nginx 反代场景）：外层做"剥前缀转发"而非 route 挂载——
+  // route 挂载下 c.req.path 仍带前缀，core/frontend 的静态服务会拼出错误路径。
+  // 转发方式让内层 app（路由/静态/中间件）全部按根路径逻辑执行，core 无需感知前缀，
+  // 且 requestContext/accessLog 仍只执行一遍。
+  if (!env.BASE_URL) return app
+  const base = env.BASE_URL
+  const root = createApp()
+  root.all('*', (c) => {
+    const url = new URL(c.req.url)
+    if (url.pathname === base) return c.redirect(`${base}/`)
+    if (url.pathname.startsWith(`${base}/`)) {
+      url.pathname = url.pathname.slice(base.length) || '/'
+      // 原请求作 init 透传（method/headers/body 等按属性逐项读取，标准行为），仅 TS 类型不识别
+      return app.fetch(new Request(url.toString(), c.req.raw as RequestInit))
+    }
+    return c.notFound()
+  })
+  root.onError(errorHandler)
+  root.notFound(notFoundHandler)
+  return root
 }
 
 /** 应用单例：测试 app.request() / 入口 app.fetch */
