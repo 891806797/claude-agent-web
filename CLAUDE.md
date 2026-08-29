@@ -5,7 +5,7 @@ Bun + Hono + Drizzle ORM + PostgreSQL 后端 + Web 版 Claude Code（基于 @ant
 ## ⚠️ 开发任何功能前，先读《开发规范.md》
 
 - **活教材**：`src/modules/auth/` 是标准业务模块范式（7 文件分层）；`src/modules/agent/` 是复杂业务模块（含 SSE/注册表/SDK 集成）的进阶参考
-- **前端**（ui/）规范见《开发规范.md》第 12 节；活教材 `ui/src/pages/ChatPage.tsx`、`AdminPage.tsx`；格式化用 ui 内 prettier（biome 不管 ui/）
+- **前端**（ui/）规范见《开发规范.md》第 13 节；活教材 `ui/src/pages/ChatPage.tsx`、`ui/src/pages/admin/`；格式化用 ui 内 prettier（biome 不管 ui/）
 - **禁区**：`src/core/**` 默认禁止修改（`core/error-codes.ts` 仅允许追加错误码）
 
 ## 常用命令
