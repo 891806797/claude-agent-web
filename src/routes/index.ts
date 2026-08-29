@@ -3,7 +3,8 @@ import { sql } from 'drizzle-orm'
 import { registerFrontendRoutes } from '@/core/frontend'
 import type { App } from '@/core/types'
 import { db } from '@/db'
-import { articleApp } from '@/modules/article'
+import { agentApp } from '@/modules/agent'
+import { authApp } from '@/modules/auth'
 
 /**
  * 路由总表 —— 看一眼即知全部对外入口。新增模块在此挂载。
@@ -19,7 +20,8 @@ export function registerRoutes(app: App): void {
   })
 
   // ---- 业务模块 ----
-  app.route('/api/articles', articleApp)
+  app.route('/api/auth', authApp)
+  app.route('/api/agent', agentApp)
 
   // ---- OpenAPI 文档 ----
   app.doc31('/openapi.json', {

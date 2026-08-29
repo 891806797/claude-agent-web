@@ -15,8 +15,8 @@ export type AppEnv = {
   Variables: {
     traceId: string
     logger: Logger
-    // ★ 认证扩展点（预留，未实现）：接入认证后取消注释并在中间件中 c.set
-    // user: { id: string; roles: string[] }
+    /** 当前登录用户名（requireAuth 中间件从 JWT 解出写入；未登录路由不存在） */
+    username: string
   }
 }
 

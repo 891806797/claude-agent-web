@@ -1,4 +1,4 @@
-import { getLogger } from '@/core/logger'
+import { cleanupOldLogFiles, getLogger } from '@/core/logger'
 import { client } from '@/db'
 import { runMigrations } from '@/db/migrate'
 import { env } from '@/env'
@@ -12,6 +12,18 @@ async function main() {
     await runMigrations()
   }
 
+  // 清理过期日志文件（按 LOG_RETENTION_DAYS）
+  cleanupOldLogFiles()
+
+  // 生产环境使用默认 JWT 密钥时强提醒（不阻断启动）
+  if (env.NODE_ENV === 'production' && env.AUTH_JWT_SECRET.includes('change-me')) {
+    logger.warn('AUTH_JWT_SECRET 为默认值，生产环境必须更换！')
+  }
+
+  // 启动清扫：终止上次崩溃遗留的 claude.exe 孤儿进程（见 agent/session-registry）
+  const { startupOrphanSweep } = await import('@/modules/agent/session-registry')
+  await startupOrphanSweep()
+
   const server = Bun.serve({
     port: env.PORT,
     fetch: app.fetch,
@@ -20,12 +32,19 @@ async function main() {
 
   logger.info({ port: server.port, env: env.NODE_ENV, logBody: env.LOG_BODY }, '服务已启动')
 
-  // 优雅停机：停止接收新连接 -> 关闭数据库连接池
+  // 优雅停机：关闭全部 agent 会话 -> 停止接收新连接 -> 关闭数据库连接池
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
       logger.info({ signal }, '正在关闭服务')
-      server.stop(true)
-      void client.end({ timeout: 5 }).then(() => process.exit(0))
+      void (async () => {
+        try {
+          const { closeAllAgentSessions } = await import('@/modules/agent/session-registry')
+          await closeAllAgentSessions('shutdown')
+        } finally {
+          server.stop(true)
+          await client.end({ timeout: 5 }).then(() => process.exit(0))
+        }
+      })()
     })
   }
 }

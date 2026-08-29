@@ -46,21 +46,21 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return body.data
 }
 
-/** 类型化 API 客户端：JSON 进出、自动解包 data、非 2xx 抛 ApiError */
+/** 类型化 API 客户端：JSON 进出、自动解包 data、非 2xx 抛 ApiError。
+ *  可选 init 用于注入自定义 header（如 agent 会话操作的 x-session-id）。 */
 export const api = {
-  get: <T>(path: string) => request<T>(path),
-  post: <T>(path: string, body?: unknown) =>
+  get: <T>(path: string, init?: RequestInit) => request<T>(path, init),
+  post: <T>(path: string, body?: unknown, init?: RequestInit) =>
     request<T>(path, {
       method: 'POST',
-      body: body === undefined ? undefined : JSON.stringify(body)
+      body: body === undefined ? undefined : JSON.stringify(body),
+      ...init
     }),
-  put: <T>(path: string, body?: unknown) =>
+  put: <T>(path: string, body?: unknown, init?: RequestInit) =>
     request<T>(path, {
       method: 'PUT',
-      body: body === undefined ? undefined : JSON.stringify(body)
+      body: body === undefined ? undefined : JSON.stringify(body),
+      ...init
     }),
-  delete: <T>(path: string) => request<T>(path, { method: 'DELETE' })
+  delete: <T>(path: string, init?: RequestInit) => request<T>(path, { method: 'DELETE', ...init })
 }
-
-/** 就绪探针：后端返回 { data: 'ok' }，非 2xx 抛 ApiError */
-export const getReady = () => api.get<string>('/readyz')

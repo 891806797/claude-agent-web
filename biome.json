@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!ui", "!dist"]
+    "includes": ["**", "!ui", "!dist", "!.claude", "!src/db/migrations", "!data", "!logs"]
   },
   "formatter": {
     "enabled": true,

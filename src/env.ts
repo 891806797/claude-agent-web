@@ -17,6 +17,48 @@ const EnvSchema = z.object({
     .transform((v) => (v ? v.trim() : undefined)),
   MIGRATE_ON_START: z.stringbool().optional(),
   MIGRATIONS_DIR: z.string().optional(),
+
+  // ---- 认证（对齐 claude-agent-desktop 的 OA Web Service 体系）----
+  /** OA 登录 Web Service 地址（可为 WSDL 地址，自动去掉 ?wsdl 得到 POST endpoint） */
+  AUTH_WEB_SERVICE_URL: z
+    .string()
+    .default(''),
+  /** OA Web Service 的 targetNamespace */
+  AUTH_WEB_SERVICE_NS: z.string().default(''),
+  /** JWT 签名密钥（生产必须更换默认值，启动时会告警） */
+  AUTH_JWT_SECRET: z.string().min(16).default('claude-agent-web-dev-jwt-secret-change-me'),
+  /** MFA secret 落库加密密钥（AES-256-GCM）；未设置时从 AUTH_JWT_SECRET 派生 */
+  AUTH_MFA_ENC_KEY: z.string().min(16).optional(),
+  /** TOTP 二维码 issuer */
+  AUTH_MFA_ISSUER: z.string().default('AI编码智能体-Web'),
+  /** 登录限流：窗口（分钟）与窗口内最大失败次数 */
+  AUTH_LOGIN_WINDOW_MINUTES: z.coerce.number().int().min(1).default(15),
+  AUTH_LOGIN_MAX_FAILURES: z.coerce.number().int().min(1).default(5),
+
+  // ---- agent 会话治理 ----
+  /** 每用户 CLAUDE_CONFIG_DIR 根（按用户名隔离会话转录与设置） */
+  AGENT_CONFIG_ROOT: z.string().default('./data/claude-configs'),
+  /** （可选）限制项目目录必须位于此根之下 */
+  AGENT_WORKSPACE_ROOT: z.string().optional(),
+  /** 无活动（且 idle）的空闲回收时长（分钟） */
+  AGENT_SESSION_IDLE_MINUTES: z.coerce.number().int().min(1).default(5),
+  /** 会话绝对寿命兜底（小时） */
+  AGENT_SESSION_MAX_LIFE_HOURS: z.coerce.number().int().min(1).default(6),
+  /** 每用户活跃会话上限 */
+  AGENT_MAX_SESSIONS_PER_USER: z.coerce.number().int().min(1).default(3),
+  /** 全局活跃会话上限 */
+  AGENT_MAX_TOTAL_SESSIONS: z.coerce.number().int().min(1).default(24),
+
+  // ---- 日志文件 ----
+  /** 按天滚动日志目录（文件名 console-YYYY-MM-DD.log） */
+  LOG_DIR: z.string().default('./logs'),
+  /** 日志保留天数（启动时清理过期文件） */
+  LOG_RETENTION_DAYS: z.coerce.number().int().min(1).default(14),
+
+  // ---- Anthropic 网关（透传给 SDK 子进程 env）----
+  ANTHROPIC_BASE_URL: z.string().optional(),
+  ANTHROPIC_AUTH_TOKEN: z.string().optional(),
+  ANTHROPIC_MODEL: z.string().optional(),
 })
 
 const parsed = EnvSchema.safeParse(Bun.env)
