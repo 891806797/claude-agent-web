@@ -49,6 +49,10 @@ export async function soapVerifyLogin(
   username: string,
   password: string,
 ): Promise<SoapLoginResult> {
+  // 认证源属内网信息，仅经 .env 配置（代码与模板均不留默认值）；未配置 = 登录服务不可用
+  if (!env.AUTH_WEB_SERVICE_URL || !env.AUTH_WEB_SERVICE_NS) {
+    return { success: false, message: '登录服务未配置（AUTH_WEB_SERVICE_URL / NS）' }
+  }
   const endpoint = toEndpoint(env.AUTH_WEB_SERVICE_URL)
   const envelope =
     '<?xml version="1.0" encoding="UTF-8"?>' +

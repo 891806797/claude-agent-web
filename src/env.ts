@@ -33,12 +33,11 @@ const EnvSchema = z.object({
     }),
 
   // ---- 认证（对齐 claude-agent-desktop 的 OA Web Service 体系）----
-  /** OA 登录 Web Service 地址（可为 WSDL 地址，自动去掉 ?wsdl 得到 POST endpoint） */
-  AUTH_WEB_SERVICE_URL: z
-    .string()
-    .default(''),
-  /** OA Web Service 的 targetNamespace */
-  AUTH_WEB_SERVICE_NS: z.string().default(''),
+  /** OA 登录 Web Service 地址（可为 WSDL 地址，自动去掉 ?wsdl 得到 POST endpoint）。
+   *  内网地址不入库不入代码，仅经 .env 配置；未配置时登录不可用（502 登录服务暂不可用） */
+  AUTH_WEB_SERVICE_URL: z.string().optional(),
+  /** OA Web Service 的 targetNamespace（同上，仅 .env 配置） */
+  AUTH_WEB_SERVICE_NS: z.string().optional(),
   /** JWT 签名密钥（生产必须更换默认值，启动时会告警） */
   AUTH_JWT_SECRET: z.string().min(16).default('claude-agent-web-dev-jwt-secret-change-me'),
   /** MFA secret 落库加密密钥（AES-256-GCM）；未设置时从 AUTH_JWT_SECRET 派生 */
