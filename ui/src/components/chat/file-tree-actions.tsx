@@ -21,20 +21,30 @@ export interface FileEntry {
   children: FileEntry[]
 }
 
-/** 扁平相对路径列表（正斜杠）→ 排序目录树（目录在前，同级按名称） */
+/**
+ * 扁平相对路径列表（正斜杠）→ 排序目录树（目录在前，同级按名称）。
+ * 目录路径以末尾 `/` 标记（后端 walkProjectFiles 约定）——据此显示空目录；
+ * 文件路径无尾斜杠。中间分段恒为目录。
+ */
 export function buildTree(paths: string[]): FileEntry[] {
   const root: FileEntry[] = []
   for (const p of paths) {
-    const parts = p.split('/')
+    const isDirPath = p.endsWith('/')
+    const clean = isDirPath ? p.slice(0, -1) : p
+    if (!clean) continue
+    const parts = clean.split('/')
     let level = root
     let acc = ''
     parts.forEach((part, i) => {
       acc = acc ? `${acc}/${part}` : part
-      const isDir = i < parts.length - 1
+      const isDir = i < parts.length - 1 || isDirPath
       let node = level.find((n) => n.name === part)
       if (!node) {
         node = { name: part, path: acc, isDir, children: [] }
         level.push(node)
+      } else if (isDir) {
+        // 防御：先作为文件出现后又被标记为目录，升级为目录
+        node.isDir = true
       }
       level = node.children
     })

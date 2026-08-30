@@ -605,10 +605,14 @@ async function walkProjectFiles(rootDir: string): Promise<string[]> {
       if (result.length >= MAX) return
       if (e.name.startsWith('.') || e.name === 'node_modules') continue
       const full = join(dir, e.name)
-      if (e.isDirectory()) await recurse(full, depth + 1)
-      // relative 返回平台分隔符（fs 域）；API 协议统一正斜杠。split(sep) 精确换算，
-      // POSIX 下 sep==='/' 恒等（replaceAll('\\','/') 会破坏含字面反斜杠的合法文件名）
-      else if (e.isFile()) result.push(relative(rootDir, full).split(sep).join('/'))
+      // 目录也收集（末尾 / 标记），让前端文件树能显示空目录；
+      // @mention 的 all=false 模式会过滤掉目录路径
+      if (e.isDirectory()) {
+        result.push(`${relative(rootDir, full).split(sep).join('/')}/`)
+        await recurse(full, depth + 1)
+      } else if (e.isFile()) {
+        result.push(relative(rootDir, full).split(sep).join('/'))
+      }
     }
   }
   await recurse(rootDir, 0)
@@ -624,10 +628,12 @@ async function getFiles(projectId: string, q: string, all = false): Promise<stri
     list = await walkProjectFiles(dir)
     filesCache.set(projectId, { list, at: Date.now() })
   }
-  if (all) return list // 文件树用：全量（≤2000），让前端 diff 出增删
+  if (all) return list // 文件树用：全量（含目录，带末尾 / 标记）
+  // @mention 用：仅文件（剥去目录路径）
+  const files = list.filter((p) => !p.endsWith('/'))
   const query = q.toLowerCase()
-  if (!query) return list.slice(0, 30)
-  return list.filter((p) => p.toLowerCase().includes(query)).slice(0, 30)
+  if (!query) return files.slice(0, 30)
+  return files.filter((p) => p.toLowerCase().includes(query)).slice(0, 30)
 }
 
 // ===== 项目文件内容（双击在线编辑：读写 1MB 内文本文件） =====
