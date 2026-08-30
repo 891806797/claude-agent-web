@@ -1,1 +1,1 @@
-ALTER TABLE "users" ADD COLUMN "role" text DEFAULT 'user' NOT NULL;
+ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "role" text DEFAULT 'user' NOT NULL;

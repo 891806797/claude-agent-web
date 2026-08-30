@@ -1,5 +1,10 @@
-CREATE TYPE "public"."article_status" AS ENUM('draft', 'published');--> statement-breakpoint
-CREATE TABLE "articles" (
+DO $$
+BEGIN
+  CREATE TYPE "public"."article_status" AS ENUM('draft', 'published');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "articles" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"title" text NOT NULL,
 	"content" text DEFAULT '' NOT NULL,
@@ -8,4 +13,4 @@ CREATE TABLE "articles" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE INDEX "articles_status_idx" ON "articles" USING btree ("status");
+CREATE INDEX IF NOT EXISTS "articles_status_idx" ON "articles" USING btree ("status");

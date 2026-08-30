@@ -1,4 +1,4 @@
-CREATE TABLE "agent_projects" (
+CREATE TABLE IF NOT EXISTS "agent_projects" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"name" text NOT NULL,
 	"path" text NOT NULL,
@@ -7,7 +7,7 @@ CREATE TABLE "agent_projects" (
 	CONSTRAINT "agent_projects_path_unique" UNIQUE("path")
 );
 --> statement-breakpoint
-CREATE TABLE "agent_session_stats" (
+CREATE TABLE IF NOT EXISTS "agent_session_stats" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"session_id" text NOT NULL,
 	"workspace_dir" text NOT NULL,
@@ -22,4 +22,4 @@ CREATE TABLE "agent_session_stats" (
 	"close_reason" text NOT NULL
 );
 --> statement-breakpoint
-CREATE INDEX "agent_session_stats_username_idx" ON "agent_session_stats" USING btree ("username");
+CREATE INDEX IF NOT EXISTS "agent_session_stats_username_idx" ON "agent_session_stats" USING btree ("username");

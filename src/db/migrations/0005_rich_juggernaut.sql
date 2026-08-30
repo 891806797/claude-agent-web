@@ -1,4 +1,4 @@
-CREATE TABLE "agent_personas" (
+CREATE TABLE IF NOT EXISTS "agent_personas" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"name" text NOT NULL,
 	"description" text DEFAULT '' NOT NULL,
@@ -8,7 +8,7 @@ CREATE TABLE "agent_personas" (
 	CONSTRAINT "agent_personas_name_unique" UNIQUE("name")
 );
 --> statement-breakpoint
-CREATE TABLE "agent_session_personas" (
+CREATE TABLE IF NOT EXISTS "agent_session_personas" (
 	"session_id" text PRIMARY KEY NOT NULL,
 	"persona_id" uuid NOT NULL,
 	"persona_name" text NOT NULL,

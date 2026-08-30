@@ -11,4 +11,7 @@ export default defineConfig({
   },
   // 列名自动 camelCase -> snake_case；须与 src/db/index.ts 中 drizzle() 的 casing 保持一致
   casing: 'snake_case',
+  // 迁移记录表放 public，不单独创建 drizzle 模式；须与 src/db/migrate.ts 的
+  // migrationsSchema 保持一致（两条迁移路径共享同一份重放记录）
+  migrations: { schema: 'public' },
 })
