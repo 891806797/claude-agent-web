@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, rmSync, unlinkSync } from 'node:fs'
+import { existsSync, readdirSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { $ } from 'bun'
 
@@ -7,8 +7,9 @@ import { $ } from 'bun'
  *
  * 流程：构建前端（ui）-> 编译单文件可执行（--asset 内嵌 ui/dist 与 migrations）
  * 产物（bin/）：
- *   app-{platform}-{arch}-{version}[.exe]  唯一产物：单文件可执行
+ *   app-{platform}-{arch}-{version}[.exe]  单文件可执行
  *   （内嵌 bun 运行时 + 前端页面 + 数据库迁移；编译版默认启动即迁移）
+ *   多平台产物共存：每次构建只替换本目标同名产物，不清空 bin/
  *
  * 运行方式：
  *   cd bin
@@ -29,6 +30,15 @@ function mapPlatform(p: string): string {
   if (p === 'win32') return 'windows'
   if (p === 'darwin') return 'darwin'
   return 'linux'
+}
+
+/** 可内嵌 CLI 的目标 -> SDK 平台包名（与 src/modules/agent/cli-path.ts 的平台分支一一对应）。
+ *  其余变体（linux-musl / darwin-x64 / arm64 系）无内嵌分支：产物不含 CLI，
+ *  部署时需目标机设 AGENT_CLI_PATH 指向自备的 claude 二进制 */
+const EMBEDDABLE_TARGETS: Record<string, string> = {
+  'windows-x64': '@anthropic-ai/claude-agent-sdk-win32-x64',
+  'linux-x64': '@anthropic-ai/claude-agent-sdk-linux-x64',
+  'darwin-arm64': '@anthropic-ai/claude-agent-sdk-darwin-arm64',
 }
 
 /** 删除产物目录下 sourcemap 残留（对编译产物无用且泄露源码） */
@@ -54,7 +64,37 @@ async function main() {
     throw new Error(`迁移目录不存在：${MIGRATIONS_SRC}（先运行 bun run db:generate）`)
   }
 
-  rmSync(OUT_DIR, { recursive: true, force: true })
+  // 预检：交叉编译需目标平台的 CLI 包参与打包，而 bun install 按本机 OS 只装本机平台包
+  // （实测 win32 机器只装 win32-x64），缺包时 bun 报笼统的 "Could not resolve"——
+  // 此处提前给出精确安装指引。本机构建不受影响（死分支不解析，已实测）。
+  const embedPkg = EMBEDDABLE_TARGETS[platformArch]
+  if (embedPkg && !existsSync(join('node_modules', embedPkg))) {
+    const { version: sdkVersion } = await Bun.file(
+      'node_modules/@anthropic-ai/claude-agent-sdk/package.json',
+    ).json()
+    throw new Error(
+      `交叉编译 ${target} 缺少目标平台 CLI 包 ${embedPkg}：\n` +
+        `  bun add ${embedPkg}@${sdkVersion}\n` +
+        '（仅构建期解析需要，构建完可还原 package.json / bun.lock）',
+    )
+  }
+  if (!embedPkg) {
+    say(`    注意：${platformArch} 变体不内嵌 CLI，产物需目标机设置 AGENT_CLI_PATH`)
+  }
+
+  // 只清理本目标旧产物与 sourcemap 残留，保留其他平台产物共存
+  // （Windows 编译版由 bun 自动补 .exe 后缀，两种名字都要清）
+  if (existsSync(OUT_DIR)) {
+    for (const name of readdirSync(OUT_DIR)) {
+      if (
+        name === `app-${platformArch}-${version}` ||
+        name === `app-${platformArch}-${version}.exe` ||
+        name.endsWith('.map')
+      ) {
+        unlinkSync(join(OUT_DIR, name))
+      }
+    }
+  }
 
   say('==> 构建前端（ui -> ui/dist）...')
   // BASE_URL 同时驱动 vite base（产物引用 /<base>/assets）——运行时后端读取同名变量挂载前缀，
@@ -72,7 +112,30 @@ async function main() {
   // 注意2：禁用 --bytecode——bun 1.4.0 下 bytecode 与 --asset 嵌入不兼容（嵌入失效），
   //        常驻 web 服务对冷启动不敏感；升级 bun 验证修复后可恢复
   // 注意3：--asset 按目录 basename 挂载到 bunfs 根（ui/dist -> dist/，migrations -> migrations/）
-  await $`bun build --compile --minify --sourcemap=none --asset ./${DIST_DIR} --asset ./${MIGRATIONS_SRC} --target=${target} --outfile ${OUT_DIR}/app-${platformArch}-${version} src/index.ts`
+  // 注意4：WSL 规避——bun 1.4.0 在 WSL 上编译较大 bundle 会在写产物阶段崩溃
+  //        （Error truncating ELF/PE file: EACCES ftruncate，与目标平台/文件系统无关），
+  //        检测到 WSL 时编译步骤委托 Windows 侧同名 bun 执行（前端构建仍在当前端完成）
+  const compileArgs = [
+    'build',
+    '--compile',
+    '--minify',
+    '--sourcemap=none',
+    '--asset',
+    `./${DIST_DIR}`,
+    '--asset',
+    `./${MIGRATIONS_SRC}`,
+    '--target',
+    target,
+    '--outfile',
+    `${OUT_DIR}/app-${platformArch}-${version}`,
+    'src/index.ts',
+  ]
+  if (process.env.WSL_DISTRO_NAME) {
+    say('    检测到 WSL：编译委托 Windows 侧 bun 执行（规避 WSL bun 产物写入崩溃）')
+    await $`cmd.exe /c bun ${compileArgs}`
+  } else {
+    await $`bun ${compileArgs}`
+  }
 
   removeSourcemaps(OUT_DIR)
 
@@ -83,7 +146,7 @@ async function main() {
 
   say(`
 打包完成。产物（bin/）：
-  ${exe}  单文件可执行（内嵌 bun 运行时 + 前端页面 + 数据库迁移，约 100MB 属正常）
+  ${exe}  单文件可执行（内嵌 bun 运行时 + 前端页面 + 数据库迁移${embedPkg ? ' + claude CLI' : ''}，${embedPkg ? '约 275~320MB' : '约 100MB，需目标机设 AGENT_CLI_PATH'}）
   编译版默认启动即迁移；如需关闭设 MIGRATE_ON_START=false
 
 运行示例（Windows PowerShell）：

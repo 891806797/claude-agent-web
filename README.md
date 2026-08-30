@@ -129,6 +129,10 @@ bun run build
 # 产物：bin/app-{platform}-{arch}-{version}[.exe] —— 唯一产物，单文件（约 300MB）
 # 内嵌 bun 运行时 + 前端页面 + 数据库迁移
 # 交叉编译：bun run build -- --target=bun-linux-x64（支持 bun-{windows|linux|darwin}-{x64|arm64}）
+#   注意：bun install 按本机 OS 只装本机平台的 CLI 包，交叉编译前需手工补装目标平台包：
+#   bun add @anthropic-ai/claude-agent-sdk-linux-x64@0.3.250   # 版本对齐 dependencies 中的 SDK
+#   （仅构建期解析需要，构建完可还原 package.json / bun.lock）
+#   musl / darwin-x64 / arm64 变体不内嵌 CLI：产物需目标机设置 AGENT_CLI_PATH 指向自备 claude 二进制
 ```
 
 部署只需把这一个可执行文件拷到目标机器，配置环境变量后直接运行：

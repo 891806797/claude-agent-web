@@ -36,3 +36,6 @@ Thumbs.db
 
 # drizzle studio
 .drizzle/
+
+# bun cross-compile runtime cache
+.bun-cache/
