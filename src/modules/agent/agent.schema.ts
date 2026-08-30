@@ -288,3 +288,133 @@ export const RewindInput = z.object({
   /** 回滚目标：某条 user message 的 uuid（checkpoint） */
   messageId: z.string().min(1),
 })
+
+// ===== 项目文件内容（双击在线编辑） =====
+
+/** 在线编辑大小上限（读/写同限，字节口径；服务端按 utf8 字节数精确校验，这里字符数只做粗筛） */
+export const MAX_EDITABLE_FILE_BYTES = 1_048_576
+
+/**
+ * 项目内相对路径协议（与 walkProjectFiles 输出对齐）：正斜杠、非空分段。
+ * 禁绝 `/` 开头、`\\`、`..`/`.` 分段与 NUL —— 第一道防目录穿越（`.` 会 resolve 成
+ * 项目根，配合删除/移动接口等于操作整个项目；service 端还有前缀校验兜底）。
+ */
+export const FilePathSchema = z
+  .string()
+  .min(1)
+  .max(500)
+  .refine(
+    (p) =>
+      !p.startsWith('/') &&
+      !p.includes('\\') &&
+      !p.includes('\0') &&
+      p.split('/').every((seg) => seg !== '..' && seg !== '' && seg !== '.'),
+    { message: '非法文件路径：仅支持项目内相对路径' },
+  )
+
+export const FileContentResult = z
+  .object({
+    path: z.string(),
+    content: z.string(),
+    size: z.number(),
+  })
+  .openapi('AgentFileContent')
+
+export const SaveFileInput = z.object({
+  projectId: z.string().uuid(),
+  path: FilePathSchema,
+  content: z.string().max(MAX_EDITABLE_FILE_BYTES),
+})
+
+export const SaveFileResult = z
+  .object({
+    path: z.string(),
+    size: z.number(),
+  })
+  .openapi('AgentFileSaveResult')
+
+export type FileContentData = z.infer<typeof FileContentResult>
+export type SaveFileData = z.infer<typeof SaveFileInput>
+
+// ===== 项目文件管理（工具栏上传/创建 + 右键删除/移动） =====
+
+/** 目录相对路径：同 FilePathSchema 但允许空串（= 项目根） */
+export const DirPathSchema = z.union([FilePathSchema, z.literal('')])
+
+/** 含控制字符（码点 0x00-0x1f）——正则内联写法被 biome noControlCharactersInRegex 禁止，码点判断同义 */
+function hasControlChar(s: string): boolean {
+  for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) < 0x20) return true
+  return false
+}
+
+/** 上传文件名（multipart 之外的传输层命名）：拒路径分隔/穿越/控制字符与 win32 保留字符 */
+const UploadFileNameSchema = z
+  .string()
+  .min(1)
+  .max(255)
+  .refine(
+    (n) =>
+      !n.includes('/') &&
+      !n.includes('\\') &&
+      !n.includes('\0') &&
+      n !== '.' &&
+      n !== '..' &&
+      !/[<>:"|?*]/.test(n) &&
+      !hasControlChar(n) &&
+      !n.endsWith('.') &&
+      !n.endsWith(' '),
+    { message: '非法文件名' },
+  )
+
+export const CreateFileInput = z.object({
+  projectId: z.string().uuid(),
+  path: FilePathSchema,
+  content: z.string().max(MAX_EDITABLE_FILE_BYTES).optional(),
+})
+
+export const CreateDirInput = z.object({
+  projectId: z.string().uuid(),
+  path: FilePathSchema,
+})
+
+export const MoveFileInput = z.object({
+  projectId: z.string().uuid(),
+  from: FilePathSchema,
+  to: FilePathSchema,
+})
+
+export const UploadFilesInput = z.object({
+  projectId: z.string().uuid(),
+  /** 目标目录（项目内相对路径；缺省/空 = 项目根） */
+  dir: DirPathSchema.optional(),
+  files: z
+    .array(
+      z.object({
+        name: UploadFileNameSchema,
+        /** base64（UTF-8 安全；宽容 base64url 变体）；1MB 文件编码后约 1.4MB，上限放余量 */
+        contentBase64: z
+          .string()
+          .min(1)
+          .max(1_500_000)
+          .regex(/^[A-Za-z0-9+/\-_]*={0,2}$/, '非法 base64 内容'),
+      }),
+    )
+    .min(1)
+    .max(10),
+})
+
+export const MoveFileResult = z
+  .object({ from: z.string(), to: z.string() })
+  .openapi('AgentFileMoveResult')
+
+export const UploadFilesResult = z
+  .object({ saved: z.array(z.string()) })
+  .openapi('AgentFilesUploadResult')
+
+export const CreateDirResult = z.object({ path: z.string() }).openapi('AgentDirCreateResult')
+
+export type CreateFileData = z.infer<typeof CreateFileInput>
+export type MoveFileData = z.infer<typeof MoveFileInput>
+export type UploadFilesData = z.infer<typeof UploadFilesInput>
+export type MoveFileResultData = z.infer<typeof MoveFileResult>
+export type UploadFilesResultData = z.infer<typeof UploadFilesResult>

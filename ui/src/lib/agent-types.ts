@@ -147,6 +147,24 @@ export interface SlashCommand {
   aliases?: string[]
 }
 
+/** 项目文件内容（双击在线编辑） */
+export interface FileContent {
+  path: string
+  content: string
+  size: number
+}
+
+/** 移动/重命名结果（文件与目录统一） */
+export interface MoveResult {
+  from: string
+  to: string
+}
+
+/** 批量上传结果 */
+export interface UploadResult {
+  saved: string[]
+}
+
 export interface ContextUsage {
   categories: { name: string; tokens: number; color: string; isDeferred?: boolean }[]
   totalTokens: number

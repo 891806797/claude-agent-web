@@ -2,10 +2,13 @@ import { api, ApiError, withBase } from './api'
 import type {
   ActiveSessionResult,
   ChatMessage,
+  FileContent,
+  MoveResult,
   Persona,
   Project,
   SessionSummary,
-  SlashCommand
+  SlashCommand,
+  UploadResult
 } from './agent-types'
 
 /**
@@ -109,8 +112,35 @@ export const agentApi = {
   // ---- 探测 ----
   getCommands: (projectId: string) =>
     api.get<SlashCommand[]>(`${BASE}/commands?projectId=${projectId}`),
-  getFiles: (projectId: string, q: string) =>
-    api.get<string[]>(`${BASE}/files?projectId=${projectId}&q=${encodeURIComponent(q)}`),
+  /** all=true 返回全量（≤2000，文件树轮询用）；默认按 q 过滤取前 30（@mention 用） */
+  getFiles: (projectId: string, q: string, all = false) =>
+    api.get<string[]>(
+      `${BASE}/files?projectId=${projectId}&q=${encodeURIComponent(q)}${all ? '&all=true' : ''}`
+    ),
+
+  // ---- 文件在线编辑 ----
+  getFileContent: (projectId: string, path: string) =>
+    api.get<FileContent>(`${BASE}/file?projectId=${projectId}&path=${encodeURIComponent(path)}`),
+  saveFileContent: (projectId: string, path: string, content: string) =>
+    api.put<{ path: string; size: number }>(`${BASE}/file`, { projectId, path, content }),
+
+  // ---- 文件管理（工具栏 + 右键菜单；文件与目录统一入口） ----
+  createFile: (projectId: string, path: string, content = '') =>
+    api.post<{ path: string; size: number }>(`${BASE}/file`, { projectId, path, content }),
+  createDir: (projectId: string, path: string) =>
+    api.post<{ path: string }>(`${BASE}/dir`, { projectId, path }),
+  /** 删除文件或目录（目录递归删除，不可恢复） */
+  deleteEntry: (projectId: string, path: string) =>
+    api.delete<void>(`${BASE}/file?projectId=${projectId}&path=${encodeURIComponent(path)}`),
+  /** 移动/重命名（目标父目录不存在自动创建） */
+  moveEntry: (projectId: string, from: string, to: string) =>
+    api.post<MoveResult>(`${BASE}/file/move`, { projectId, from, to }),
+  /** 批量上传（前端转 base64 走 JSON；单个 ≤1MB、≤10 个） */
+  uploadFiles: (
+    projectId: string,
+    dir: string,
+    files: Array<{ name: string; contentBase64: string }>
+  ) => api.post<UploadResult>(`${BASE}/file/upload`, { projectId, dir, files }),
 
   /** SSE 端点 URL（EventSource 不支持自定义 header，sid/ws 走 query；
    *  EventSource 不经过 api.request，前缀需显式 withBase） */

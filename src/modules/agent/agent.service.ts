@@ -1,5 +1,5 @@
-import { readdir, stat } from 'node:fs/promises'
-import { join, relative } from 'node:path'
+import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { dirname, join, posix, relative, resolve, sep } from 'node:path'
 import {
   type Query,
   query,
@@ -18,13 +18,14 @@ import type {
   ApprovalData,
   CreatePersonaData,
   CreateProjectData,
+  FileContentData,
   OpenSessionData,
   Persona,
   Project,
   SwitchPersonaData,
   UpdatePersonaData,
 } from './agent.schema'
-import { toPersona, toProject } from './agent.schema'
+import { FilePathSchema, MAX_EDITABLE_FILE_BYTES, toPersona, toProject } from './agent.schema'
 import { buildProbeQueryOptions } from './agent-query-options'
 import {
   deleteUserSession,
@@ -123,8 +124,9 @@ async function resolvePersona(personaId: string): Promise<ResolvedPersona> {
 async function createProject(username: string, data: CreateProjectData): Promise<Project> {
   const dir = normalizeDir(data.path)
   if (env.AGENT_WORKSPACE_ROOT) {
+    // normalizeDir 输出是归一化域（win32 已强制正斜杠），分隔符恒为 posix.sep
     const root = normalizeDir(env.AGENT_WORKSPACE_ROOT)
-    if (dir !== root && !dir.startsWith(`${root}/`)) {
+    if (dir !== root && !dir.startsWith(`${root}${posix.sep}`)) {
       throw new AppError('AGENT_PROJECT_PATH_INVALID', {
         message: `项目路径必须位于 ${env.AGENT_WORKSPACE_ROOT} 之下`,
       })
@@ -576,10 +578,15 @@ function toCommandDto(cmd: SDKSlashCommand): SlashCommand {
   }
 }
 
-// ===== @mention 文件列表（项目目录内，遍历有界 + 进程级缓存）=====
+// ===== @mention 文件列表 / 文件树（项目目录内，遍历有界 + 短 TTL 缓存）=====
 
-/** 项目文件清单缓存（projectId → 相对路径列表；文件变动需刷新页面） */
-const filesCache = new Map<string, string[]>()
+/**
+ * 项目文件清单缓存：projectId → { list, at }。
+ * 短 TTL 让前端轮询/事件触发的刷新能看到增删（多客户端共享同一份 walk 结果，
+ * TTL 窗口内的并发请求不重复遍历）；遍历本身有界（2000 文件/6 层），重 walk 代价可控。
+ */
+const filesCache = new Map<string, { list: string[]; at: number }>()
+const FILES_CACHE_TTL_MS = 3_000
 
 /** 遍历项目目录文件（忽略 .git/node_modules/点文件，深度与数量有界防大仓库卡顿） */
 async function walkProjectFiles(rootDir: string): Promise<string[]> {
@@ -599,23 +606,181 @@ async function walkProjectFiles(rootDir: string): Promise<string[]> {
       if (e.name.startsWith('.') || e.name === 'node_modules') continue
       const full = join(dir, e.name)
       if (e.isDirectory()) await recurse(full, depth + 1)
-      else if (e.isFile()) result.push(relative(rootDir, full).replaceAll('\\', '/'))
+      // relative 返回平台分隔符（fs 域）；API 协议统一正斜杠。split(sep) 精确换算，
+      // POSIX 下 sep==='/' 恒等（replaceAll('\\','/') 会破坏含字面反斜杠的合法文件名）
+      else if (e.isFile()) result.push(relative(rootDir, full).split(sep).join('/'))
     }
   }
   await recurse(rootDir, 0)
   return result
 }
 
-async function getFiles(projectId: string, q: string): Promise<string[]> {
+async function getFiles(projectId: string, q: string, all = false): Promise<string[]> {
   const dir = await requireProjectDir(projectId)
-  let list = filesCache.get(projectId)
+  const hit = filesCache.get(projectId)
+  const fresh = hit && Date.now() - hit.at < FILES_CACHE_TTL_MS
+  let list = fresh ? hit.list : undefined
   if (!list) {
     list = await walkProjectFiles(dir)
-    filesCache.set(projectId, list)
+    filesCache.set(projectId, { list, at: Date.now() })
   }
+  if (all) return list // 文件树用：全量（≤2000），让前端 diff 出增删
   const query = q.toLowerCase()
   if (!query) return list.slice(0, 30)
   return list.filter((p) => p.toLowerCase().includes(query)).slice(0, 30)
+}
+
+// ===== 项目文件内容（双击在线编辑：读写 1MB 内文本文件） =====
+
+/**
+ * 项目内相对路径 → 绝对路径。zod FilePathSchema 已挡穿越（拒绝 `/` 开头、`\\`、`..` 分段），
+ * 此处 resolve + 前缀校验是第二道防线（兜底盘符等 zod 未枚举的绝对形态）。
+ * 抛 AGENT_FILE_PATH_INVALID 而非静默改写 —— 路径问题必须显式暴露。导出供单测。
+ */
+export function resolveProjectFile(projectDir: string, relPath: string): string {
+  // DB 存的 projectDir 是 normalizeDir 归一化口径（win32 小写+正斜杠），resolve 后
+  // 两侧统一为平台分隔符再比前缀，避免把合法项目内文件误判为穿越
+  const root = resolve(projectDir)
+  const abs = resolve(projectDir, relPath)
+  if (abs !== root && !abs.startsWith(`${root}${sep}`)) {
+    throw new AppError('AGENT_FILE_PATH_INVALID')
+  }
+  return abs
+}
+
+async function readFileContent(projectId: string, relPath: string): Promise<FileContentData> {
+  const dir = await requireProjectDir(projectId)
+  const abs = resolveProjectFile(dir, relPath)
+  const info = await stat(abs).catch(() => null)
+  if (!info?.isFile()) throw new AppError('AGENT_FILE_NOT_FOUND')
+  if (info.size > MAX_EDITABLE_FILE_BYTES) throw new AppError('AGENT_FILE_TOO_LARGE')
+  const buf = await readFile(abs)
+  // NUL 探测（前 8KB 足以识别）：合法 UTF-8 文本不含 0x00
+  if (buf.subarray(0, 8000).includes(0)) throw new AppError('AGENT_FILE_BINARY')
+  return { path: relPath, content: buf.toString('utf8'), size: info.size }
+}
+
+async function saveFileContent(
+  projectId: string,
+  relPath: string,
+  content: string,
+): Promise<{ path: string; size: number }> {
+  const dir = await requireProjectDir(projectId)
+  const abs = resolveProjectFile(dir, relPath)
+  const info = await stat(abs).catch(() => null)
+  // 仅允许改已存在文件（编辑入口来自文件清单），不经 API 创建新文件
+  if (!info?.isFile()) throw new AppError('AGENT_FILE_NOT_FOUND')
+  const bytes = Buffer.byteLength(content, 'utf8')
+  if (bytes > MAX_EDITABLE_FILE_BYTES) throw new AppError('AGENT_FILE_TOO_LARGE')
+  await writeFile(abs, content, 'utf8')
+  log().info({ projectId, path: relPath, bytes }, '项目文件已保存')
+  return { path: relPath, size: bytes }
+}
+
+// ===== 项目文件管理（工具栏上传/创建 + 右键删除/移动；文件与目录统一入口） =====
+
+/** 创建文件（父目录递归创建；已存在 409）。与 PUT /file 分离——后者仅覆盖已存在文件 */
+async function createFile(
+  projectId: string,
+  relPath: string,
+  content = '',
+): Promise<{ path: string; size: number }> {
+  const dir = await requireProjectDir(projectId)
+  const abs = resolveProjectFile(dir, relPath)
+  if (await stat(abs).catch(() => null)) throw new AppError('AGENT_FILE_EXISTS')
+  const bytes = Buffer.byteLength(content, 'utf8')
+  if (bytes > MAX_EDITABLE_FILE_BYTES) throw new AppError('AGENT_FILE_TOO_LARGE')
+  await mkdir(dirname(abs), { recursive: true })
+  await writeFile(abs, content, 'utf8')
+  log().info({ projectId, path: relPath, bytes }, '项目文件已创建')
+  filesCache.delete(projectId)
+  return { path: relPath, size: bytes }
+}
+
+/** 创建目录（递归创建中间层级；已存在 409） */
+async function createDir(projectId: string, relPath: string): Promise<{ path: string }> {
+  const dir = await requireProjectDir(projectId)
+  const abs = resolveProjectFile(dir, relPath)
+  if (await stat(abs).catch(() => null)) throw new AppError('AGENT_FILE_EXISTS')
+  await mkdir(abs, { recursive: true })
+  log().info({ projectId, path: relPath }, '项目目录已创建')
+  filesCache.delete(projectId)
+  return { path: relPath }
+}
+
+/** 删除文件或目录（目录递归删除，前端确认框已明示；不存在/非常规类型 404） */
+async function deletePath(projectId: string, relPath: string): Promise<void> {
+  const dir = await requireProjectDir(projectId)
+  const abs = resolveProjectFile(dir, relPath)
+  const info = await stat(abs).catch(() => null)
+  if (!info) throw new AppError('AGENT_FILE_NOT_FOUND')
+  if (info.isDirectory()) await rm(abs, { recursive: true })
+  else if (info.isFile()) await unlink(abs)
+  else throw new AppError('AGENT_FILE_NOT_FOUND')
+  log().info(
+    { projectId, path: relPath, kind: info.isDirectory() ? 'dir' : 'file' },
+    '项目路径已删除',
+  )
+  filesCache.delete(projectId)
+}
+
+/**
+ * 移动/重命名文件或目录。目标父目录不存在时自动创建（递归）；
+ * 目录移入自身内部会造成环形结构，显式拒绝。
+ */
+async function movePath(
+  projectId: string,
+  from: string,
+  to: string,
+): Promise<{ from: string; to: string }> {
+  if (from === to) return { from, to }
+  const dir = await requireProjectDir(projectId)
+  const fromAbs = resolveProjectFile(dir, from)
+  const info = await stat(fromAbs).catch(() => null)
+  if (!info) throw new AppError('AGENT_FILE_NOT_FOUND')
+  const toAbs = resolveProjectFile(dir, to)
+  if (info.isDirectory() && toAbs.startsWith(`${fromAbs}${sep}`)) {
+    throw new AppError('AGENT_FILE_PATH_INVALID', { message: '不能将目录移动到自身内部' })
+  }
+  if (await stat(toAbs).catch(() => null)) throw new AppError('AGENT_FILE_EXISTS')
+  await mkdir(dirname(toAbs), { recursive: true })
+  await rename(fromAbs, toAbs)
+  log().info({ projectId, from, to, kind: info.isDirectory() ? 'dir' : 'file' }, '项目路径已移动')
+  filesCache.delete(projectId)
+  return { from, to }
+}
+
+/**
+ * 批量上传文件（前端转 base64 走 JSON，规避 multipart 在 zod-openapi 管线外的特例）。
+ * 冲突与大小先整体预检（任一不通过即全部拒绝，不留半写状态）。
+ */
+async function uploadFiles(
+  projectId: string,
+  dir: string,
+  files: Array<{ name: string; contentBase64: string }>,
+): Promise<{ saved: string[] }> {
+  const root = await requireProjectDir(projectId)
+  const entries = files.map((f) => {
+    // 协议域拼接：目标相对路径 = 目录 + 文件名（zod 已保证 name 无分隔符/穿越）
+    const rel = posix.join(dir, f.name)
+    if (!FilePathSchema.safeParse(rel).success) throw new AppError('AGENT_FILE_PATH_INVALID')
+    return { rel, abs: resolveProjectFile(root, rel), buf: Buffer.from(f.contentBase64, 'base64') }
+  })
+  for (const e of entries) {
+    if (await stat(e.abs).catch(() => null)) {
+      throw new AppError('AGENT_FILE_EXISTS', { message: `文件已存在：${e.rel}` })
+    }
+    if (e.buf.byteLength > MAX_EDITABLE_FILE_BYTES) {
+      throw new AppError('AGENT_FILE_TOO_LARGE', { message: `文件超过 1MB：${e.rel}` })
+    }
+  }
+  for (const e of entries) {
+    await mkdir(dirname(e.abs), { recursive: true })
+    await writeFile(e.abs, e.buf)
+  }
+  log().info({ projectId, dir, count: entries.length }, '项目文件已上传')
+  filesCache.delete(projectId)
+  return { saved: entries.map((e) => e.rel) }
 }
 
 // ===== 看板统计 =====
@@ -701,5 +866,12 @@ export const agentService = {
   getActiveSessionInfo,
   getCommands,
   getFiles,
+  readFileContent,
+  saveFileContent,
+  createFile,
+  createDir,
+  deletePath,
+  movePath,
+  uploadFiles,
   getStats,
 }

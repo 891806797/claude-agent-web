@@ -32,6 +32,11 @@ export const ErrorCodes = {
   AGENT_PERSONA_NOT_FOUND: { status: 404, message: '智能体不存在' },
   AGENT_PERSONA_NAME_EXISTS: { status: 409, message: '智能体名称已存在' },
   AGENT_PERSONA_SWITCH_BUSY: { status: 409, message: '会话忙碌，请在空闲时切换智能体' },
+  AGENT_FILE_NOT_FOUND: { status: 404, message: '文件不存在或不是普通文件' },
+  AGENT_FILE_PATH_INVALID: { status: 422, message: '非法文件路径：仅支持项目内相对路径' },
+  AGENT_FILE_TOO_LARGE: { status: 413, message: '文件超过 1MB，不支持在线编辑' },
+  AGENT_FILE_BINARY: { status: 415, message: '二进制文件不支持在线编辑' },
+  AGENT_FILE_EXISTS: { status: 409, message: '文件或目录已存在' },
 } as const satisfies Record<string, { status: number; message: string }>
 
 export type ErrorCode = keyof typeof ErrorCodes

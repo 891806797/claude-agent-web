@@ -1,25 +1,50 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  AtSign,
   Braces,
   ChevronRight,
+  Copy,
   FileCode,
   FileCog,
   FileImage,
   FileJson,
+  FilePlus2,
   FileText,
   FileType,
   Folder,
-  Search
+  FolderInput,
+  FolderPlus,
+  PenLine,
+  Pencil,
+  Search,
+  Trash2,
+  Upload
 } from 'lucide-react'
+import { toast } from '@/components/ui/sonner'
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger
+} from '@/components/ui/context-menu'
 import { agentApi } from '@/lib/agent-api'
+import { FileEditorDialog } from './FileEditorDialog'
+import {
+  buildTree,
+  CreateEntryDialog,
+  DeleteEntryDialog,
+  isUnderPath,
+  MoveEntryDialog,
+  RenameEntryDialog,
+  UploadDialog,
+  type FileEntry
+} from './file-tree-actions'
 import type { FileSearchHit } from './chat-input/types'
 
-interface FileEntry {
-  name: string
-  path: string
-  isDir: boolean
-  children: FileEntry[]
-}
+/** 右键菜单动作（open 仅文件；new-file/new-dir/upload 仅目录） */
+type EntryAction =
+  'open' | 'cite' | 'copy' | 'move' | 'rename' | 'delete' | 'new-file' | 'new-dir' | 'upload'
 
 type IconType = React.ComponentType<{ className?: string }>
 
@@ -54,61 +79,118 @@ function FileIcon({ name, isDir }: { name: string; isDir: boolean }): React.JSX.
   return <Icon className={`size-3.5 ${color} shrink-0`} />
 }
 
-function buildTree(paths: string[]): FileEntry[] {
-  const root: FileEntry[] = []
-  for (const p of paths) {
-    const parts = p.split('/')
-    let level = root
-    let acc = ''
-    parts.forEach((part, i) => {
-      acc = acc ? `${acc}/${part}` : part
-      const isDir = i < parts.length - 1
-      let node = level.find((n) => n.name === part)
-      if (!node) {
-        node = { name: part, path: acc, isDir, children: [] }
-        level.push(node)
-      }
-      level = node.children
-    })
-  }
-  const sort = (nodes: FileEntry[]) => {
-    nodes.sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1))
-    nodes.forEach((n) => sort(n.children))
-  }
-  sort(root)
-  return root
-}
-
 /** 单击文件 → 注入 composer @chip（PromptInput 监听 window 'composer:insert' 事件） */
 function insertToComposer(path: string): void {
   window.dispatchEvent(new CustomEvent<string>('composer:insert', { detail: path }))
 }
 
-function TreeNode({ entry, depth }: { entry: FileEntry; depth: number }): React.JSX.Element {
+/** 文件树周期刷新间隔（agent 写文件等关键事件另有 'files:refresh' 即时触发，轮询兜底外部改动） */
+const TREE_POLL_MS = 10_000
+
+/** 单击/双击消歧窗口：单击延迟 230ms 注入 @chip，双击在窗口内取消注入改开编辑器 */
+const CLICK_DISAMBIGUATE_MS = 230
+
+/** 右键菜单内容（文件：打开…；目录：新建文件/新建目录…；两者共有引用/复制/移动/删除） */
+function EntryMenuItems({
+  entry,
+  onAction
+}: {
+  entry: FileEntry
+  onAction: (action: EntryAction, entry: FileEntry) => void
+}): React.JSX.Element {
+  const item = 'flex items-center gap-2'
+  return (
+    <ContextMenuContent>
+      {entry.isDir ? (
+        <>
+          <ContextMenuItem className={item} onSelect={() => onAction('new-file', entry)}>
+            <FilePlus2 /> 新建文件
+          </ContextMenuItem>
+          <ContextMenuItem className={item} onSelect={() => onAction('new-dir', entry)}>
+            <FolderPlus /> 新建目录
+          </ContextMenuItem>
+          <ContextMenuItem className={item} onSelect={() => onAction('upload', entry)}>
+            <Upload /> 上传文件
+          </ContextMenuItem>
+        </>
+      ) : (
+        <ContextMenuItem className={item} onSelect={() => onAction('open', entry)}>
+          <PenLine /> 打开
+        </ContextMenuItem>
+      )}
+      <ContextMenuSeparator />
+      <ContextMenuItem className={item} onSelect={() => onAction('cite', entry)}>
+        <AtSign /> 引用
+      </ContextMenuItem>
+      <ContextMenuItem className={item} onSelect={() => onAction('copy', entry)}>
+        <Copy /> 复制路径
+      </ContextMenuItem>
+      <ContextMenuItem className={item} onSelect={() => onAction('move', entry)}>
+        <FolderInput /> 移动到…
+      </ContextMenuItem>
+      <ContextMenuItem className={item} onSelect={() => onAction('rename', entry)}>
+        <Pencil /> 重命名
+      </ContextMenuItem>
+      <ContextMenuSeparator />
+      <ContextMenuItem
+        className={`${item} text-red-500 focus:text-red-500`}
+        onSelect={() => onAction('delete', entry)}
+      >
+        <Trash2 /> 删除
+      </ContextMenuItem>
+    </ContextMenuContent>
+  )
+}
+
+function TreeNode({
+  entry,
+  depth,
+  onSelect,
+  onOpen,
+  onAction
+}: {
+  entry: FileEntry
+  depth: number
+  onSelect: (path: string) => void
+  onOpen: (path: string) => void
+  onAction: (action: EntryAction, entry: FileEntry) => void
+}): React.JSX.Element {
   const [expanded, setExpanded] = useState(depth < 1)
   // web 一次拉全量构建树（后端有界遍历），目录子节点已预置，无懒加载
   if (entry.isDir) {
     return (
       <div>
-        <button
-          type="button"
-          onClick={() => setExpanded((v) => !v)}
-          className="flex items-center gap-1.5 w-full h-6 px-1.5 rounded-md text-left transition-colors duration-75 hover:bg-[var(--overlay-hover)] text-[12px] text-[var(--text-muted)]"
-          style={{ paddingLeft: 8 + depth * 12 }}
-        >
-          <ChevronRight
-            className={[
-              'size-3 shrink-0 text-[var(--text-faint)] transition-transform',
-              expanded && 'rotate-90'
-            ].join(' ')}
-          />
-          <FileIcon name={entry.name} isDir />
-          <span className="truncate flex-1">{entry.name}</span>
-        </button>
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <button
+              type="button"
+              onClick={() => setExpanded((v) => !v)}
+              className="flex items-center gap-1.5 w-full h-6 px-1.5 rounded-md text-left transition-colors duration-75 hover:bg-[var(--overlay-hover)] text-[12px] text-[var(--text-muted)]"
+              style={{ paddingLeft: 8 + depth * 12 }}
+            >
+              <ChevronRight
+                className={[
+                  'size-3 shrink-0 text-[var(--text-faint)] transition-transform',
+                  expanded && 'rotate-90'
+                ].join(' ')}
+              />
+              <FileIcon name={entry.name} isDir />
+              <span className="truncate flex-1">{entry.name}</span>
+            </button>
+          </ContextMenuTrigger>
+          <EntryMenuItems entry={entry} onAction={onAction} />
+        </ContextMenu>
         {expanded && entry.children.length > 0 && (
           <div>
             {entry.children.map((c) => (
-              <TreeNode key={c.path} entry={c} depth={depth + 1} />
+              <TreeNode
+                key={c.path}
+                entry={c}
+                depth={depth + 1}
+                onSelect={onSelect}
+                onOpen={onOpen}
+                onAction={onAction}
+              />
             ))}
           </div>
         )}
@@ -124,22 +206,28 @@ function TreeNode({ entry, depth }: { entry: FileEntry; depth: number }): React.
     )
   }
   return (
-    <button
-      type="button"
-      draggable
-      onClick={() => insertToComposer(entry.path)}
-      onDragStart={(e) => {
-        e.dataTransfer.setData('text/plain', 'file:' + entry.path)
-        e.dataTransfer.effectAllowed = 'copyMove'
-      }}
-      className="flex items-center gap-1.5 w-full h-6 px-1.5 rounded-md text-left transition-colors duration-75 hover:bg-[var(--overlay-hover)] text-[12px] text-[var(--text-muted)]"
-      style={{ paddingLeft: 8 + depth * 12 + 12 }}
-      title={`引用 ${entry.path}`}
-    >
-      <span className="w-3 shrink-0" />
-      <FileIcon name={entry.name} isDir={false} />
-      <span className="truncate flex-1">{entry.name}</span>
-    </button>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <button
+          type="button"
+          draggable
+          onClick={() => onSelect(entry.path)}
+          onDoubleClick={() => onOpen(entry.path)}
+          onDragStart={(e) => {
+            e.dataTransfer.setData('text/plain', 'file:' + entry.path)
+            e.dataTransfer.effectAllowed = 'copyMove'
+          }}
+          className="flex items-center gap-1.5 w-full h-6 px-1.5 rounded-md text-left transition-colors duration-75 hover:bg-[var(--overlay-hover)] text-[12px] text-[var(--text-muted)]"
+          style={{ paddingLeft: 8 + depth * 12 + 12 }}
+          title={`单击引用 · 双击编辑 · 右键更多 ${entry.path}`}
+        >
+          <span className="w-3 shrink-0" />
+          <FileIcon name={entry.name} isDir={false} />
+          <span className="truncate flex-1">{entry.name}</span>
+        </button>
+      </ContextMenuTrigger>
+      <EntryMenuItems entry={entry} onAction={onAction} />
+    </ContextMenu>
   )
 }
 
@@ -149,19 +237,148 @@ export function FileTree({ projectId }: { projectId: string | null }): React.JSX
   const [results, setResults] = useState<FileSearchHit[]>([])
   const [searching, setSearching] = useState(false)
   const [activeIndex, setActiveIndex] = useState(0)
+  /** 双击打开的编辑器文件（相对路径）；null = 关闭 */
+  const [editingPath, setEditingPath] = useState<string | null>(null)
   const searchSeq = useRef(0)
+  const treeSeq = useRef(0)
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([])
+  const clickTimer = useRef<number | null>(null)
+  useEffect(
+    () => () => {
+      if (clickTimer.current !== null) clearTimeout(clickTimer.current)
+    },
+    []
+  )
 
+  /** 全量文件树刷新（竞态守卫；失败静默，等下一轮） */
+  const refreshTree = useCallback(async () => {
+    if (!projectId) return
+    const seq = ++treeSeq.current
+    try {
+      const files = await agentApi.getFiles(projectId, '', true)
+      if (seq === treeSeq.current) setTree(buildTree(files))
+    } catch {
+      // 静默：下一轮轮询/事件重试
+    }
+  }, [projectId])
+
+  // 初始加载 + 周期刷新（页面隐藏时跳过省请求）+ 'files:refresh' 事件即时刷新
+  // （chat store 在 agent turn_end 时 dispatch —— 工作区被 agent 改动后立即同步）+ 切回可见即刷
   useEffect(() => {
     if (!projectId) {
       setTree([])
       return
     }
-    agentApi
-      .getFiles(projectId, '')
-      .then((files) => setTree(buildTree(files)))
-      .catch(() => setTree([]))
-  }, [projectId])
+    refreshTree()
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') refreshTree()
+    }, TREE_POLL_MS)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') refreshTree()
+    }
+    const onFilesRefresh = () => refreshTree()
+    document.addEventListener('visibilitychange', onVisible)
+    window.addEventListener('files:refresh', onFilesRefresh)
+    return () => {
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+      window.removeEventListener('files:refresh', onFilesRefresh)
+    }
+  }, [projectId, refreshTree])
+
+  /** 单击（延迟注入 @chip；after 在注入生效后回调，供搜索行清空输入） */
+  const handleFileClick = (path: string, after?: () => void) => {
+    if (clickTimer.current !== null) clearTimeout(clickTimer.current)
+    clickTimer.current = setTimeout(() => {
+      insertToComposer(path)
+      after?.()
+    }, CLICK_DISAMBIGUATE_MS)
+  }
+
+  /** 双击：取消挂起的单击注入，打开编辑弹框 */
+  const handleFileOpen = (path: string) => {
+    if (clickTimer.current !== null) {
+      clearTimeout(clickTimer.current)
+      clickTimer.current = null
+    }
+    setEditingPath(path)
+  }
+
+  // ===== 文件管理（工具栏 + 右键菜单）=====
+  /** 挂起的管理弹框；null = 关闭（条件渲染挂载，无需状态复位） */
+  const [createDlg, setCreateDlg] = useState<{ kind: 'file' | 'dir'; baseDir: string } | null>(null)
+  const [moveDlg, setMoveDlg] = useState<{ path: string; isDir: boolean } | null>(null)
+  const [renameDlg, setRenameDlg] = useState<string | null>(null)
+  const [deleteDlg, setDeleteDlg] = useState<{ path: string; isDir: boolean } | null>(null)
+  const [uploadList, setUploadList] = useState<File[] | null>(null)
+  /** 本次上传的目标目录（目录右键上传 = 该目录；工具栏上传 = 项目根） */
+  const [uploadDir, setUploadDir] = useState('')
+  const uploadInputRef = useRef<HTMLInputElement>(null)
+
+  /** 右键菜单/工具栏动作分发 */
+  const handleEntryAction = (action: EntryAction, entry: FileEntry): void => {
+    switch (action) {
+      case 'open':
+        handleFileOpen(entry.path)
+        break
+      case 'cite':
+        insertToComposer(entry.path)
+        break
+      case 'copy':
+        void navigator.clipboard.writeText(entry.path).then(
+          () => toast.success(`已复制 ${entry.path}`),
+          () => toast.error('复制失败')
+        )
+        break
+      case 'move':
+        setMoveDlg({ path: entry.path, isDir: entry.isDir })
+        break
+      case 'rename':
+        setRenameDlg(entry.path)
+        break
+      case 'delete':
+        setDeleteDlg({ path: entry.path, isDir: entry.isDir })
+        break
+      case 'new-file':
+        setCreateDlg({ kind: 'file', baseDir: entry.path })
+        break
+      case 'new-dir':
+        setCreateDlg({ kind: 'dir', baseDir: entry.path })
+        break
+      case 'upload':
+        // 记住目标目录再触发文件选择器（onChange 时 state 已生效）
+        setUploadDir(entry.path)
+        uploadInputRef.current?.click()
+        break
+    }
+  }
+
+  /** 创建成功：刷新树；新文件直接进入编辑 */
+  const afterCreate = (kind: 'file' | 'dir', fullPath: string): void => {
+    void refreshTree()
+    if (kind === 'file') setEditingPath(fullPath)
+  }
+
+  /** 移动/重命名成功：刷新树；正被编辑的文件改指新路径（目录则整体改前缀） */
+  const afterMove = (from: string, to: string): void => {
+    void refreshTree()
+    if (editingPath === from) setEditingPath(to)
+    else if (editingPath !== null && isUnderPath(editingPath, from))
+      setEditingPath(to + editingPath.slice(from.length))
+  }
+
+  /** 删除成功：刷新树；正被编辑的路径位于其下则关闭编辑器 */
+  const afterDelete = (path: string): void => {
+    void refreshTree()
+    if (editingPath !== null && isUnderPath(editingPath, path)) setEditingPath(null)
+  }
+
+  /** 文件选择器 → 打开上传弹框（value 复位以允许连续选同一批文件） */
+  const onPickFiles = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    const list = Array.from(e.target.files ?? [])
+    e.target.value = ''
+    if (list.length > 0) setUploadList(list)
+  }
 
   // 文件搜索（防抖 + 竞态守卫），同 PromptInput 的 @ 搜索数据源
   useEffect(() => {
@@ -228,24 +445,48 @@ export function FileTree({ projectId }: { projectId: string | null }): React.JSX
   return (
     <div className="h-full flex flex-col">
       <div className="p-2 border-b border-[var(--border-muted)] shrink-0">
-        <div className="flex items-center gap-1.5 rounded-md bg-[var(--bg-layer-01)] px-2 py-1.5">
-          <Search className="size-3.5 text-[var(--text-faint)] shrink-0" />
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={handleSearchKeyDown}
-            placeholder="搜索文件…（Enter 引用）"
-            spellCheck={false}
-            className="flex-1 bg-transparent text-[12px] text-[var(--text-base)] placeholder:text-[var(--text-faint)] outline-none"
-          />
-          {searching && q && (
-            <span className="size-3 rounded-full border border-[var(--text-faint)] border-t-transparent animate-spin shrink-0" />
-          )}
+        <div className="flex items-center gap-1.5">
+          <div className="flex flex-1 items-center gap-1.5 rounded-md bg-[var(--bg-layer-01)] px-2 py-1.5 min-w-0">
+            <Search className="size-3.5 text-[var(--text-faint)] shrink-0" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={handleSearchKeyDown}
+              placeholder="搜索文件…（Enter 引用）"
+              spellCheck={false}
+              className="flex-1 bg-transparent text-[12px] text-[var(--text-base)] placeholder:text-[var(--text-faint)] outline-none"
+            />
+            {searching && q && (
+              <span className="size-3 rounded-full border border-[var(--text-faint)] border-t-transparent animate-spin shrink-0" />
+            )}
+          </div>
+          <button
+            type="button"
+            title="上传文件"
+            disabled={!projectId}
+            onClick={() => {
+              setUploadDir('')
+              uploadInputRef.current?.click()
+            }}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[var(--text-muted)] transition-colors hover:bg-[var(--overlay-hover)] hover:text-[var(--text-base)] disabled:pointer-events-none disabled:opacity-40"
+          >
+            <Upload className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            title="新建文件"
+            disabled={!projectId}
+            onClick={() => setCreateDlg({ kind: 'file', baseDir: '' })}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[var(--text-muted)] transition-colors hover:bg-[var(--overlay-hover)] hover:text-[var(--text-base)] disabled:pointer-events-none disabled:opacity-40"
+          >
+            <FilePlus2 className="size-3.5" />
+          </button>
+          <input ref={uploadInputRef} type="file" multiple hidden onChange={onPickFiles} />
         </div>
         {q && !searching && (
           <div className="mt-1 px-1 text-[11px] text-[var(--text-faint)]">
             {results.length > 0
-              ? `找到 ${results.length} 个文件 · ↑↓ 选择 · Enter 引用`
+              ? `找到 ${results.length} 个文件 · ↑↓ 选择 · Enter 引用 · 双击编辑`
               : '无匹配文件'}
           </div>
         )}
@@ -256,36 +497,45 @@ export function FileTree({ projectId }: { projectId: string | null }): React.JSX
         ) : q ? (
           <div className="py-1">
             {results.map((hit, i) => (
-              <button
-                key={hit.path}
-                type="button"
-                draggable
-                ref={(el) => {
-                  itemRefs.current[i] = el
-                }}
-                onMouseEnter={() => setActiveIndex(i)}
-                onClick={() => {
-                  insertToComposer(hit.path)
-                  setQuery('')
-                  setResults([])
-                }}
-                onDragStart={(e) => {
-                  e.dataTransfer.setData('text/plain', 'file:' + hit.path)
-                  e.dataTransfer.effectAllowed = 'copyMove'
-                }}
-                className={[
-                  'flex items-center gap-1.5 w-full h-6 px-2 rounded-md text-left transition-colors text-[12px] text-[var(--text-muted)]',
-                  i === activeIndex
-                    ? 'bg-[var(--overlay-hover)]'
-                    : 'hover:bg-[var(--overlay-hover)]'
-                ].join(' ')}
-              >
-                <FileIcon name={hit.name} isDir={false} />
-                <span className="truncate shrink-0 max-w-[45%]">{hit.name}</span>
-                <span className="text-[11px] text-[var(--text-faint)] truncate flex-1 text-right">
-                  {hit.relativePath}
-                </span>
-              </button>
+              <ContextMenu key={hit.path}>
+                <ContextMenuTrigger asChild>
+                  <button
+                    type="button"
+                    draggable
+                    ref={(el) => {
+                      itemRefs.current[i] = el
+                    }}
+                    onMouseEnter={() => setActiveIndex(i)}
+                    onClick={() =>
+                      handleFileClick(hit.path, () => {
+                        setQuery('')
+                        setResults([])
+                      })
+                    }
+                    onDoubleClick={() => handleFileOpen(hit.path)}
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData('text/plain', 'file:' + hit.path)
+                      e.dataTransfer.effectAllowed = 'copyMove'
+                    }}
+                    className={[
+                      'flex items-center gap-1.5 w-full h-6 px-2 rounded-md text-left transition-colors text-[12px] text-[var(--text-muted)]',
+                      i === activeIndex
+                        ? 'bg-[var(--overlay-hover)]'
+                        : 'hover:bg-[var(--overlay-hover)]'
+                    ].join(' ')}
+                  >
+                    <FileIcon name={hit.name} isDir={false} />
+                    <span className="truncate shrink-0 max-w-[45%]">{hit.name}</span>
+                    <span className="text-[11px] text-[var(--text-faint)] truncate flex-1 text-right">
+                      {hit.relativePath}
+                    </span>
+                  </button>
+                </ContextMenuTrigger>
+                <EntryMenuItems
+                  entry={{ name: hit.name, path: hit.path, isDir: false, children: [] }}
+                  onAction={handleEntryAction}
+                />
+              </ContextMenu>
             ))}
           </div>
         ) : emptyTree ? (
@@ -293,11 +543,76 @@ export function FileTree({ projectId }: { projectId: string | null }): React.JSX
         ) : (
           <div className="py-1">
             {tree.map((entry) => (
-              <TreeNode key={entry.path} entry={entry} depth={0} />
+              <TreeNode
+                key={entry.path}
+                entry={entry}
+                depth={0}
+                onSelect={handleFileClick}
+                onOpen={handleFileOpen}
+                onAction={handleEntryAction}
+              />
             ))}
           </div>
         )}
       </div>
+
+      {/* 双击文件 → 在线编辑弹框（读取/保存走 /api/agent/file） */}
+      <FileEditorDialog
+        open={editingPath !== null}
+        onOpenChange={(o) => {
+          if (!o) setEditingPath(null)
+        }}
+        projectId={projectId}
+        path={editingPath}
+      />
+
+      {/* 文件管理弹框（条件渲染挂载；成功回调统一刷新树并联动编辑器） */}
+      {createDlg && projectId && (
+        <CreateEntryDialog
+          kind={createDlg.kind}
+          baseDir={createDlg.baseDir}
+          projectId={projectId}
+          onCreated={afterCreate}
+          onClose={() => setCreateDlg(null)}
+        />
+      )}
+      {moveDlg && projectId && (
+        <MoveEntryDialog
+          projectId={projectId}
+          path={moveDlg.path}
+          isDir={moveDlg.isDir}
+          tree={tree}
+          onDone={(to) => afterMove(moveDlg.path, to)}
+          onClose={() => setMoveDlg(null)}
+        />
+      )}
+      {renameDlg && projectId && (
+        <RenameEntryDialog
+          projectId={projectId}
+          path={renameDlg}
+          onDone={(to) => afterMove(renameDlg, to)}
+          onClose={() => setRenameDlg(null)}
+        />
+      )}
+      {deleteDlg && projectId && (
+        <DeleteEntryDialog
+          projectId={projectId}
+          path={deleteDlg.path}
+          isDir={deleteDlg.isDir}
+          onDone={() => afterDelete(deleteDlg.path)}
+          onClose={() => setDeleteDlg(null)}
+        />
+      )}
+      {uploadList && projectId && (
+        <UploadDialog
+          projectId={projectId}
+          files={uploadList}
+          initialDir={uploadDir}
+          tree={tree}
+          onDone={() => void refreshTree()}
+          onClose={() => setUploadList(null)}
+        />
+      )}
     </div>
   )
 }

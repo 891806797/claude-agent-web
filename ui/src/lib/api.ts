@@ -54,6 +54,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     }
     throw new ApiError(res.status, code, message, traceId, details)
   }
+  // 204 No Content（如删除接口）无 body，res.json() 会抛 SyntaxError，直接返回空
+  if (res.status === 204) return undefined as T
   const body = (await res.json()) as { data: T }
   return body.data
 }

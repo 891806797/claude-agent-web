@@ -7,14 +7,23 @@ import {
   ActiveSessionResult,
   ApprovalInput,
   ChatMessageDto,
+  CreateDirInput,
+  CreateDirResult,
+  CreateFileInput,
   CreatePersonaInput,
   CreateProjectInput,
+  FileContentResult,
+  FilePathSchema,
+  MoveFileInput,
+  MoveFileResult,
   OpenSessionInput,
   OpenSessionResult,
   PersonaDto,
   ProjectDto,
   RenameSessionInput,
   RewindInput,
+  SaveFileInput,
+  SaveFileResult,
   SendMessageInput,
   SendMessageResult,
   SessionHeaders,
@@ -22,6 +31,8 @@ import {
   SlashCommandDto,
   SwitchPersonaInput,
   UpdatePersonaInput,
+  UploadFilesInput,
+  UploadFilesResult,
 } from './agent.schema'
 import { agentService, requireSessionCtx } from './agent.service'
 import { decodeDir, normalizeDir } from './paths'
@@ -333,13 +344,128 @@ const filesRoute = createRoute({
   method: 'get',
   path: '/files',
   tags: ['agent-probe'],
-  summary: '@mention 文件列表（项目目录内，按 q 过滤，遍历有界）',
+  summary: '文件列表（@mention 按 q 过滤取前 30；all=true 全量 ≤2000 供文件树轮询）',
   request: {
-    query: z.object({ projectId: z.string().uuid(), q: z.string().max(200).optional() }),
+    query: z.object({
+      projectId: z.string().uuid(),
+      q: z.string().max(200).optional(),
+      all: z.enum(['true', 'false']).optional(),
+    }),
   },
   responses: {
     200: jsonResponse(ApiResponseSchema(z.array(z.string())), '成功'),
     404: jsonResponse(ErrorResponseSchema, '项目不存在'),
+  },
+})
+
+const fileRoute = createRoute({
+  method: 'get',
+  path: '/file',
+  tags: ['agent-file'],
+  summary: '读取项目文件内容（1MB 内文本文件，供在线编辑）',
+  request: {
+    query: z.object({ projectId: z.string().uuid(), path: FilePathSchema }),
+  },
+  responses: {
+    200: jsonResponse(ApiResponseSchema(FileContentResult), '成功'),
+    404: jsonResponse(ErrorResponseSchema, '项目或文件不存在'),
+    413: jsonResponse(ErrorResponseSchema, '文件超过 1MB'),
+    415: jsonResponse(ErrorResponseSchema, '二进制文件'),
+  },
+})
+
+const saveFileRoute = createRoute({
+  method: 'put',
+  path: '/file',
+  tags: ['agent-file'],
+  summary: '保存项目文件内容（仅已存在文件，整体覆盖，UTF-8）',
+  request: {
+    body: { required: true, content: { 'application/json': { schema: SaveFileInput } } },
+  },
+  responses: {
+    200: jsonResponse(ApiResponseSchema(SaveFileResult), '成功'),
+    404: jsonResponse(ErrorResponseSchema, '项目或文件不存在'),
+    413: jsonResponse(ErrorResponseSchema, '内容超过 1MB'),
+  },
+})
+
+const createFileRoute = createRoute({
+  method: 'post',
+  path: '/file',
+  tags: ['agent-file'],
+  summary: '创建项目文件（父目录递归创建；已存在 409）',
+  request: {
+    body: { required: true, content: { 'application/json': { schema: CreateFileInput } } },
+  },
+  responses: {
+    201: jsonResponse(ApiResponseSchema(SaveFileResult), '已创建'),
+    404: jsonResponse(ErrorResponseSchema, '项目不存在'),
+    409: jsonResponse(ErrorResponseSchema, '文件已存在'),
+    413: jsonResponse(ErrorResponseSchema, '内容超过 1MB'),
+    422: jsonResponse(ErrorResponseSchema, '路径非法'),
+  },
+})
+
+const deleteFileRoute = createRoute({
+  method: 'delete',
+  path: '/file',
+  tags: ['agent-file'],
+  summary: '删除项目文件或目录（目录递归删除，不可恢复）',
+  request: {
+    query: z.object({ projectId: z.string().uuid(), path: FilePathSchema }),
+  },
+  responses: {
+    204: NoContent,
+    404: jsonResponse(ErrorResponseSchema, '项目或路径不存在'),
+  },
+})
+
+const moveFileRoute = createRoute({
+  method: 'post',
+  path: '/file/move',
+  tags: ['agent-file'],
+  summary: '移动/重命名项目文件或目录（目标父目录不存在时自动创建；不能移入自身内部）',
+  request: {
+    body: { required: true, content: { 'application/json': { schema: MoveFileInput } } },
+  },
+  responses: {
+    200: jsonResponse(ApiResponseSchema(MoveFileResult), '成功'),
+    404: jsonResponse(ErrorResponseSchema, '项目或源路径不存在'),
+    409: jsonResponse(ErrorResponseSchema, '目标路径已存在'),
+    422: jsonResponse(ErrorResponseSchema, '路径非法（含移入自身内部）'),
+  },
+})
+
+const createDirRoute = createRoute({
+  method: 'post',
+  path: '/dir',
+  tags: ['agent-file'],
+  summary: '创建项目目录（递归创建中间层级；已存在 409）',
+  request: {
+    body: { required: true, content: { 'application/json': { schema: CreateDirInput } } },
+  },
+  responses: {
+    201: jsonResponse(ApiResponseSchema(CreateDirResult), '已创建'),
+    404: jsonResponse(ErrorResponseSchema, '项目不存在'),
+    409: jsonResponse(ErrorResponseSchema, '目录已存在'),
+    422: jsonResponse(ErrorResponseSchema, '路径非法'),
+  },
+})
+
+const uploadFilesRoute = createRoute({
+  method: 'post',
+  path: '/file/upload',
+  tags: ['agent-file'],
+  summary: '批量上传文件（≤10 个、单个 ≤1MB，base64 JSON；目标目录缺省项目根；冲突整体拒绝）',
+  request: {
+    body: { required: true, content: { 'application/json': { schema: UploadFilesInput } } },
+  },
+  responses: {
+    200: jsonResponse(ApiResponseSchema(UploadFilesResult), '成功'),
+    404: jsonResponse(ErrorResponseSchema, '项目不存在'),
+    409: jsonResponse(ErrorResponseSchema, '同名文件已存在'),
+    413: jsonResponse(ErrorResponseSchema, '文件超过 1MB'),
+    422: jsonResponse(ErrorResponseSchema, '文件名或目录非法'),
   },
 })
 
@@ -506,8 +632,44 @@ export function registerAgentRoutes(app: App): void {
   })
 
   app.openapi(filesRoute, async (c) => {
-    const { projectId, q } = c.req.valid('query')
-    return ok(c, await agentService.getFiles(projectId, q ?? ''))
+    const { projectId, q, all } = c.req.valid('query')
+    return ok(c, await agentService.getFiles(projectId, q ?? '', all === 'true'))
+  })
+
+  app.openapi(fileRoute, async (c) => {
+    const { projectId, path } = c.req.valid('query')
+    return ok(c, await agentService.readFileContent(projectId, path))
+  })
+
+  app.openapi(saveFileRoute, async (c) => {
+    const { projectId, path, content } = c.req.valid('json')
+    return ok(c, await agentService.saveFileContent(projectId, path, content))
+  })
+
+  app.openapi(createFileRoute, async (c) => {
+    const { projectId, path, content } = c.req.valid('json')
+    return created(c, await agentService.createFile(projectId, path, content ?? ''))
+  })
+
+  app.openapi(deleteFileRoute, async (c) => {
+    const { projectId, path } = c.req.valid('query')
+    await agentService.deletePath(projectId, path)
+    return c.body(null, 204)
+  })
+
+  app.openapi(moveFileRoute, async (c) => {
+    const { projectId, from, to } = c.req.valid('json')
+    return ok(c, await agentService.movePath(projectId, from, to))
+  })
+
+  app.openapi(createDirRoute, async (c) => {
+    const { projectId, path } = c.req.valid('json')
+    return created(c, await agentService.createDir(projectId, path))
+  })
+
+  app.openapi(uploadFilesRoute, async (c) => {
+    const { projectId, dir, files } = c.req.valid('json')
+    return ok(c, await agentService.uploadFiles(projectId, dir ?? '', files))
   })
 
   // ---- SSE（app.get 例外：无 JSON 响应体）----

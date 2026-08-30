@@ -208,6 +208,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
     if (event === 'turn_end') {
       set({ status: 'idle', activeToolCall: null })
+      // 一轮结束可能写过文件：通知文件树刷新（FileTree 监听 window 'files:refresh'）
+      window.dispatchEvent(new Event('files:refresh'))
       return
     }
     if (event === 'error') {
