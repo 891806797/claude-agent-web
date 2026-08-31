@@ -21,7 +21,7 @@ export default defineConfig({
     dedupe: ['react', 'react-dom']
   },
   server: {
-    port: 5173,
+    port: 3001,
     strictPort: true,
     // 开发期代理到后端 bun/hono 服务（生产前端由可执行文件内嵌服务，同源直连）。
     // 设了 BASE_URL 时前端请求带 /claude 前缀，这里剥掉前缀转发给根路径的后端

@@ -481,6 +481,15 @@ export function FileTree({ projectId }: { projectId: string | null }): React.JSX
           >
             <FilePlus2 className="size-3.5" />
           </button>
+          <button
+            type="button"
+            title="新建文件夹"
+            disabled={!projectId}
+            onClick={() => setCreateDlg({ kind: 'dir', baseDir: '' })}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[var(--text-muted)] transition-colors hover:bg-[var(--overlay-hover)] hover:text-[var(--text-base)] disabled:pointer-events-none disabled:opacity-40"
+          >
+            <FolderPlus className="size-3.5" />
+          </button>
           <input ref={uploadInputRef} type="file" multiple hidden onChange={onPickFiles} />
         </div>
         {q && !searching && (
