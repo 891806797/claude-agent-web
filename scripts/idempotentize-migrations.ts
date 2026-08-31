@@ -16,6 +16,9 @@ import { join } from 'node:path'
  * 约束：幂等（重复运行输出不变）；不触碰 meta/（drizzle-kit diff 依据）。
  * drizzle 迁移器按 journal 时间戳判定已应用（不比对文件内容），改写不影响旧库。
  * 迁移文件禁止手改——本脚本是唯一合法的批量改写入径。
+ *
+ * schema 由部署方预创建（DBA 负责）：pgSchema 首次迁移会产出 CREATE SCHEMA "xxx"，
+ * 本脚本整体剔除该语句（迁移只建表，不创建 schema）。
  */
 
 const MIGRATIONS_DIR = 'src/db/migrations'
@@ -23,8 +26,6 @@ const BREAKPOINT = '--> statement-breakpoint'
 
 /** 行内替换规则（负向前瞻防止对已幂等形式二次套用） */
 const INLINE_RULES: Array<[RegExp, string]> = [
-  // CREATE SCHEMA 须先于 CREATE TABLE：pgSchema 首次迁移会产出 CREATE SCHEMA "xxx"
-  [/^CREATE SCHEMA (?!IF NOT EXISTS)/im, 'CREATE SCHEMA IF NOT EXISTS '],
   [/^CREATE TABLE (?!IF NOT EXISTS)/im, 'CREATE TABLE IF NOT EXISTS '],
   [/^CREATE UNIQUE INDEX (?!IF NOT EXISTS)/im, 'CREATE UNIQUE INDEX IF NOT EXISTS '],
   [/^CREATE INDEX (?!IF NOT EXISTS)/im, 'CREATE INDEX IF NOT EXISTS '],
@@ -46,10 +47,12 @@ const WRAP_RULES: RegExp[] = [
   /^ALTER TABLE .* ADD CONSTRAINT /i,
 ]
 
-/** 单条语句 → 幂等形式；已幂等（DO 块/已带 IF）原样返回 */
+/** 单条语句 → 幂等形式；已幂等（DO 块/已带 IF）原样返回；CREATE SCHEMA 整体剔除（返回空） */
 export function idempotentizeStatement(raw: string): string {
   const stmt = raw.trim()
   if (!stmt || stmt.startsWith('DO $$')) return raw
+  // schema 由部署方预创建，迁移只建表：剔除 CREATE SCHEMA 语句
+  if (/^CREATE SCHEMA /i.test(stmt)) return ''
   if (WRAP_RULES.some((r) => r.test(stmt))) {
     return `DO $$\nBEGIN\n  ${stmt}\nEXCEPTION WHEN duplicate_object THEN NULL;\nEND $$;`
   }

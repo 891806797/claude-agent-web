@@ -1,5 +1,5 @@
 {
-  "id": "d791c612-3d84-4628-8d77-75eef7134697",
+  "id": "c6218879-55df-4acd-8630-b5c7522e036c",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -401,9 +401,7 @@
     }
   },
   "enums": {},
-  "schemas": {
-    "claude_agent_web": "claude_agent_web"
-  },
+  "schemas": {},
   "sequences": {},
   "roles": {},
   "policies": {},

@@ -1,5 +1,3 @@
-CREATE SCHEMA IF NOT EXISTS "claude_agent_web";
---> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "claude_agent_web"."agent_personas" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"name" text NOT NULL,

@@ -78,7 +78,9 @@ export function cleanupOldLogFiles(): void {
 const fileStream = new DailyRollingFileStream(env.LOG_DIR)
 const prettyStream = pretty({
   colorize: true,
-  translateTime: 'SYS:HH:MM:ss.l',
+  // SYS: 跟随宿主机时区（部署机已设 Asia/Shanghai → 北京时间）；
+  // 带日期，避免跨天日志看不出哪天
+  translateTime: 'SYS:yyyy-mm-dd HH:MM:ss.l',
   ignore: 'pid,hostname',
 })
 
@@ -87,6 +89,9 @@ export const requestContextStorage = new AsyncLocalStorage<RequestContext>()
 export const rootLogger: Logger = pino(
   {
     level: env.LOG_LEVEL,
+    // time 字段用 ISO（UTC，绝对正确且人可读）；pretty stdout 再经 translateTime
+    // 按宿主机时区转北京时间显示。文件 raw JSON 保留 UTC ISO 便于跨时区溯源。
+    timestamp: pino.stdTimeFunctions.isoTime,
     redact: {
       // 递归脱敏任意层级下的敏感字段（含 LOG_BODY 记录的请求体）
       paths: ['**.password', '**.token', '**.authorization', '**.secret', '**.accessKey'],
