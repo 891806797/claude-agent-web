@@ -1,4 +1,5 @@
-import { bigint, boolean, index, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core'
+import { bigint, boolean, index, text, timestamp, uuid } from 'drizzle-orm/pg-core'
+import { appSchema } from '@/db/app-schema'
 
 /**
  * auth 表定义 -- 只依赖 drizzle-orm，不依赖任何业务代码（drizzle-kit 独立加载）。
@@ -9,7 +10,7 @@ import { bigint, boolean, index, pgTable, text, timestamp, uuid } from 'drizzle-
  * users：登录用户档案。密码不落库（SOAP 在线验密），此表只承载 MFA 绑定与审计信息。
  * mfa_secret_enc：AES-256-GCM 密文（iv:tag:ciphertext base64 拼接），密钥见 env AUTH_MFA_ENC_KEY。
  */
-export const users = pgTable('users', {
+export const users = appSchema.table('users', {
   id: uuid().primaryKey().defaultRandom(),
   username: text().notNull().unique(),
   /** 角色：admin / user；admin 由 AUTH_ADMIN_USERS 白名单在登录时自动提升（本期仅存储与下发） */
@@ -26,7 +27,7 @@ export const users = pgTable('users', {
  * login_attempts：登录尝试流水，支撑限流（窗口内失败 N 次临时锁定）。
  * 保留窗口外的记录仅供审计，由服务层定期清理。
  */
-export const loginAttempts = pgTable(
+export const loginAttempts = appSchema.table(
   'login_attempts',
   {
     id: uuid().primaryKey().defaultRandom(),

@@ -1,4 +1,5 @@
-import { bigint, index, integer, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core'
+import { bigint, index, integer, text, timestamp, uuid } from 'drizzle-orm/pg-core'
+import { appSchema } from '@/db/app-schema'
 
 /**
  * agent 模块表：
@@ -9,7 +10,7 @@ import { bigint, index, integer, pgTable, text, timestamp, uuid } from 'drizzle-
  * 会话消息本体存 SDK JSONL（按用户隔离的 CLAUDE_CONFIG_DIR），不入库。
  */
 
-export const agentProjects = pgTable('agent_projects', {
+export const agentProjects = appSchema.table('agent_projects', {
   id: uuid('id').primaryKey().defaultRandom(),
   name: text('name').notNull(),
   /** 项目绝对路径（注册时已归一化为正斜杠小写，唯一） */
@@ -18,7 +19,7 @@ export const agentProjects = pgTable('agent_projects', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
-export const agentPersonas = pgTable('agent_personas', {
+export const agentPersonas = appSchema.table('agent_personas', {
   id: uuid('id').primaryKey().defaultRandom(),
   name: text('name').notNull().unique(),
   description: text('description').notNull().default(''),
@@ -28,7 +29,7 @@ export const agentPersonas = pgTable('agent_personas', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
-export const agentSessionPersonas = pgTable('agent_session_personas', {
+export const agentSessionPersonas = appSchema.table('agent_session_personas', {
   /** SDK 会话 id（resume 回填的键；一个会话至多一条绑定） */
   sessionId: text('session_id').primaryKey(),
   /** 溯源用（无外键；persona 删除后悬空无害，注入以快照为准） */
@@ -39,7 +40,7 @@ export const agentSessionPersonas = pgTable('agent_session_personas', {
   systemPrompt: text('system_prompt').notNull(),
 })
 
-export const agentSessionStats = pgTable(
+export const agentSessionStats = appSchema.table(
   'agent_session_stats',
   {
     id: uuid('id').primaryKey().defaultRandom(),

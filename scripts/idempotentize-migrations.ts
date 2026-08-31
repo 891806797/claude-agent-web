@@ -23,6 +23,8 @@ const BREAKPOINT = '--> statement-breakpoint'
 
 /** 行内替换规则（负向前瞻防止对已幂等形式二次套用） */
 const INLINE_RULES: Array<[RegExp, string]> = [
+  // CREATE SCHEMA 须先于 CREATE TABLE：pgSchema 首次迁移会产出 CREATE SCHEMA "xxx"
+  [/^CREATE SCHEMA (?!IF NOT EXISTS)/im, 'CREATE SCHEMA IF NOT EXISTS '],
   [/^CREATE TABLE (?!IF NOT EXISTS)/im, 'CREATE TABLE IF NOT EXISTS '],
   [/^CREATE UNIQUE INDEX (?!IF NOT EXISTS)/im, 'CREATE UNIQUE INDEX IF NOT EXISTS '],
   [/^CREATE INDEX (?!IF NOT EXISTS)/im, 'CREATE INDEX IF NOT EXISTS '],

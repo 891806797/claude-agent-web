@@ -8,6 +8,25 @@ const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().min(1),
+  /** 业务表所在 schema（公司统一库下各产品的独立 schema；不可为 public）。
+   *  与 src/db/app-schema.ts 共用 process.env.DB_SCHEMA，
+   *  须与 .env 保持一致——generate 时读到的值会字面写入迁移 SQL。 */
+  DB_SCHEMA: z
+    .string()
+    .min(1)
+    .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, '须为合法 PG 标识符：字母/下划线开头，仅含字母数字下划线')
+    .refine((v) => v !== 'public', '不可用 public（public 为公共区，业务表应独立 schema）')
+    .default('claude_agent_web'),
+  /** 迁移记录表 __drizzle_migrations 所在 schema（默认 public）。
+   *  public 一定存在，migrator 首次 ensure 记录表最稳；
+   *  若设为业务 schema，该 schema 必须在首次迁移前已存在（DBA 预创建），
+   *  否则 migrator 建记录表时 schema 不存在会失败——CREATE SCHEMA 在迁移 SQL 里，
+   *  时机晚于 ensure 记录表。须与 drizzle.config.ts 的 migrations.schema 保持一致。 */
+  MIGRATIONS_SCHEMA: z
+    .string()
+    .min(1)
+    .regex(/^[A-Za-z_][A-Za-z0-9_]*$/, '须为合法 PG 标识符：字母/下划线开头，仅含字母数字下划线')
+    .default('public'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   LOG_BODY: z.stringbool().default(false),
   DB_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),

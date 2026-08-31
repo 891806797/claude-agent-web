@@ -10,15 +10,16 @@ import { db } from './index'
  * 挂载于 bunfs 的 migrations/）> 开发默认 ./src/db/migrations。
  * 开发环境常规走 `bun run db:migrate`（drizzle-kit）。
  *
- * migrationsSchema='public'：迁移记录表 __drizzle_migrations 与业务表同放 public，
- * 不再单独创建 drizzle 模式（迁移器默认行为）。须与 drizzle.config.ts 的
- * migrations.schema 保持一致，否则两条迁移路径记录互相看不见、重复重放。
+ * migrationsSchema：迁移记录表 __drizzle_migrations 所在 schema，由 .env 的
+ * MIGRATIONS_SCHEMA 配置（默认 public）。须与 drizzle.config.ts 的 migrations.schema
+ * 保持一致，否则两条迁移路径记录互相看不见、重复重放。
+ * 注意：migrator 先 ensure 记录表再跑迁移 SQL，故该 schema 必须已存在——默认 public 最稳。
  */
 export async function runMigrations(): Promise<void> {
   const logger = getLogger('migrate')
   const migrationsFolder = env.MIGRATIONS_DIR ?? defaultMigrationsFolder()
-  logger.info({ migrationsFolder }, '开始执行数据库迁移')
-  await migrate(db, { migrationsFolder, migrationsSchema: 'public' })
+  logger.info({ migrationsFolder, migrationsSchema: env.MIGRATIONS_SCHEMA }, '开始执行数据库迁移')
+  await migrate(db, { migrationsFolder, migrationsSchema: env.MIGRATIONS_SCHEMA })
   logger.info('数据库迁移完成')
 }
 
