@@ -23,6 +23,7 @@ import type {
   Persona,
   Project,
   SwitchPersonaData,
+  SwitchRunModeData,
   UpdatePersonaData,
 } from './agent.schema'
 import { FilePathSchema, MAX_EDITABLE_FILE_BYTES, toPersona, toProject } from './agent.schema'
@@ -37,7 +38,7 @@ import type { PendingApprovalView } from './approval-manager'
 import { normalizeDir } from './paths'
 import type { SessionContext } from './session-registry'
 import * as registry from './session-registry'
-import type { ChatMessage, SanitizedSession, SlashCommand } from './sse-events'
+import type { ChatMessage, RunMode, SanitizedSession, SlashCommand } from './sse-events'
 
 /**
  * agent 业务层 —— 不 import hono 任何内容（可独立单测）。
@@ -209,12 +210,17 @@ async function listSessions(
   }))
 }
 
+/** 历史消息 + 事件锚点（ctx 活跃时为读 JSONL 完成时刻的 ctx.seq；不活跃为 null）。
+ *  前端 loadHistory 后以 seq 为锚 SSE 增量重放（sinceSeq）：已落盘事件 seq ≤ 锚点不重放（无重复），
+ *  锚点后事件必在 buffer（无缺口）。 */
 async function getSessionMessages(
   username: string,
   workspaceDir: string,
   sessionId: string,
-): Promise<ChatMessage[]> {
-  return getUserSessionMessages(username, sessionId, workspaceDir)
+): Promise<{ messages: ChatMessage[]; seq: number | null }> {
+  const messages = await getUserSessionMessages(username, sessionId, workspaceDir)
+  const seq = registry.getActiveSession(workspaceDir)?.seq ?? null
+  return { messages, seq }
 }
 
 async function deleteSession(
@@ -275,6 +281,15 @@ async function openSession(username: string, data: OpenSessionData) {
       }
     }
   }
+  // runMode 解析：新会话取入参；resume 取 DB 快照（与 persona 同链路，防模式漂移）；缺省 standard
+  const runMode: RunMode =
+    data.runMode ??
+    (data.resumeSessionId
+      ? ((await agentRepository.findRunMode(db, data.resumeSessionId))?.runMode as
+          | RunMode
+          | undefined)
+      : undefined) ??
+    'standard'
   const outcome = await registry.openSession({
     username,
     projectPath,
@@ -282,6 +297,7 @@ async function openSession(username: string, data: OpenSessionData) {
     ...(data.firstMessage ? { firstMessage: data.firstMessage } : {}),
     ...(data.evict ? { evict: true } : {}),
     ...(persona ? { appendSystemPrompt: persona.appendSystemPrompt } : {}),
+    runMode,
   })
   // 绑定快照落库（幂等覆盖；resume 回填写回同值不变语义。
   // 注：极罕见情况下 SDK resume 后换 sid，绑定仍记请求 sid——该会话下次 resume 退化为标准，可接受）
@@ -293,6 +309,8 @@ async function openSession(username: string, data: OpenSessionData) {
       systemPrompt: persona.appendSystemPrompt,
     })
   }
+  // runMode 快照落库（幂等覆盖；resume 回填写回同值，新会话写初始值）
+  await agentRepository.upsertRunMode(db, { sessionId: outcome.sessionId, runMode })
   log().info(
     {
       username,
@@ -301,6 +319,7 @@ async function openSession(username: string, data: OpenSessionData) {
       evicted: outcome.evicted,
       resume: Boolean(data.resumeSessionId),
       persona: persona?.personaName,
+      runMode,
     },
     '会话已开启',
   )
@@ -318,11 +337,16 @@ async function switchSessionPersona(
   data: SwitchPersonaData,
 ) {
   const persona = data.personaId ? await resolvePersona(data.personaId) : undefined
+  // runMode 正交于 persona，须保留：从 DB 快照回填（切人格不切模式）
+  const runMode: RunMode =
+    ((await agentRepository.findRunMode(db, sessionId))?.runMode as RunMode | undefined) ??
+    'standard'
   const outcome = await registry.switchSessionPersona({
     username,
     projectPath: workspaceDir,
     sessionId,
     ...(persona ? { appendSystemPrompt: persona.appendSystemPrompt } : {}),
+    runMode,
   })
   if (persona) {
     await agentRepository.upsertSessionPersona(db, {
@@ -429,6 +453,7 @@ async function getActiveSessionInfo(username: string, workspaceDir: string) {
       state: ctx.state,
       startedAt: ctx.createdAt,
       turns: ctx.turns,
+      runMode: ctx.runMode,
       ...(bound ? { personaId: bound.personaId, personaName: bound.personaName } : {}),
       // 当前生效人格（最后切换/开启值）：前端选择器以此校准显示
       ...(ctx.systemPrompt ? { systemPrompt: ctx.systemPrompt } : {}),
@@ -850,6 +875,22 @@ async function getStats(): Promise<{
   }
 }
 
+/**
+ * 热切换执行模式：registry.setRunMode（更新 ctx + plan ⇄ setPermissionMode + 广播）+ DB 快照落库。
+ * idle 校验在 registry 层（turn 进行中/审批挂起中 409）。不重启进程。
+ */
+async function setRunMode(
+  username: string,
+  workspaceDir: string,
+  sessionId: string,
+  data: SwitchRunModeData,
+): Promise<void> {
+  const ctx = requireSessionCtx(username, workspaceDir, sessionId)
+  await registry.setRunMode(ctx, data.runMode)
+  await agentRepository.upsertRunMode(db, { sessionId: ctx.sessionId, runMode: data.runMode })
+  log().info({ username, sessionId, runMode: data.runMode }, '执行模式已切换')
+}
+
 export const agentService = {
   listProjects,
   createProject,
@@ -859,6 +900,7 @@ export const agentService = {
   updatePersona,
   removePersona,
   switchSessionPersona,
+  setRunMode,
   listSessions,
   getSessionMessages,
   deleteSession,

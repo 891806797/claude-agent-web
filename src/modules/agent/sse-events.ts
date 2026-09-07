@@ -78,6 +78,10 @@ export interface ApprovalResponse {
 
 export type ApprovalOutcome = 'allow' | 'deny' | 'timeout' | 'closed'
 
+// ===== 执行模式（会话级审批宽严度；canUseTool 现读 ctx.runMode 决定门禁）=====
+
+export type RunMode = 'auto' | 'standard' | 'safe' | 'plan'
+
 // ===== 会话关闭原因（agent_session_stats.closeReason 同集）=====
 
 export type SessionCloseReason =
@@ -174,6 +178,7 @@ export type SSEEvent =
   | { event: 'error'; data: { message: string } }
   | { event: 'turn_end'; data: { partial: boolean } }
   | { event: 'query_closed'; data: { reason: SessionCloseReason } }
+  | { event: 'run_mode'; data: { mode: RunMode } }
 
 // ===== 会话摘要（列表接口返回）=====
 

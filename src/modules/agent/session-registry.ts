@@ -7,7 +7,11 @@ import { env } from '@/env'
 import { agentRepository } from './agent.repository'
 import type { OccupiedInfoData } from './agent.schema'
 import { translateSessionStream } from './agent-event-translator'
-import { buildSessionQueryOptions, type CanUseToolFn } from './agent-query-options'
+import {
+  buildSessionQueryOptions,
+  type CanUseToolFn,
+  permissionModeFor,
+} from './agent-query-options'
 import {
   removeUserSessionTranscript,
   userSessionTranscriptHasMessages,
@@ -22,7 +26,7 @@ import {
 } from './approval-manager'
 import { normalizeDir } from './paths'
 import { SdkInputStream } from './sdk-input-stream'
-import type { SequencedEvent, SessionCloseReason, SSEEvent } from './sse-events'
+import type { RunMode, SequencedEvent, SessionCloseReason, SSEEvent } from './sse-events'
 import { ensureUserConfigDir } from './user-config'
 
 /**
@@ -74,6 +78,8 @@ export interface SessionContext {
   untitled: boolean
   /** 会话当前生效的 append 系统提示词（最后切换/开启值；undefined = 标准 Claude） */
   systemPrompt?: string
+  /** 执行模式（canUseTool 现读决定门禁；plan 时 SDK permissionMode:'plan' 只读） */
+  runMode: RunMode
 }
 
 export interface OpenSessionParams {
@@ -87,6 +93,8 @@ export interface OpenSessionParams {
   firstImages?: Array<{ dataUrl: string; mime: string }>
   /** 追加到 claude_code 预设后的系统提示词（persona 注入；缺省 = 标准 Claude） */
   appendSystemPrompt?: string
+  /** 执行模式（service 层解析：新会话取入参；resume/切人格取 DB 快照；缺省 standard） */
+  runMode?: RunMode
 }
 
 export interface OpenSessionOutcome {
@@ -130,6 +138,8 @@ export function switchSessionPersona(params: {
   sessionId: string
   /** 新的 append 提示词；缺省 = 切回标准 Claude */
   appendSystemPrompt?: string
+  /** 执行模式（正交于 persona，须保留；service 层 findRunMode 回填） */
+  runMode?: RunMode
 }): Promise<OpenSessionOutcome> {
   const dir = normalizeDir(params.projectPath)
   return withDirLock(dir, async () => {
@@ -155,6 +165,7 @@ export function switchSessionPersona(params: {
         projectPath: params.projectPath,
         resumeSessionId: params.sessionId,
         appendSystemPrompt: params.appendSystemPrompt,
+        runMode: params.runMode,
         evict: true,
       },
       dir,
@@ -291,6 +302,7 @@ function createSessionContext(
       sessionId: resumeSid ? undefined : sessionId,
       ...(resumeSid ? { resume: resumeSid } : {}),
       ...(params.appendSystemPrompt ? { appendSystemPrompt: params.appendSystemPrompt } : {}),
+      runMode: params.runMode ?? 'standard',
       abortController,
       canUseTool: makeCanUseTool(() => ctx, approvals),
       sessionLogger,
@@ -318,6 +330,7 @@ function createSessionContext(
     finalized: false,
     untitled: false,
     systemPrompt: params.appendSystemPrompt,
+    runMode: params.runMode ?? 'standard',
   }
 
   void translateSessionStream(queryObj, {
@@ -354,16 +367,25 @@ function createSessionContext(
   return ctx
 }
 
-/** canUseTool：仅命令类 + AskUserQuestion 走人工审批，其余直接放行 */
+/** canUseTool：SDK 未提供对应档的 standard/safe 自定义门禁；auto 走 SDK bypass（canUseTool 不被调）、plan 走 SDK plan（兜底 deny） */
 function makeCanUseTool(
   getContext: () => SessionContext,
   approvals: ApprovalManager,
 ): CanUseToolFn {
   return async (toolName, input, opts) => {
-    if (!needsApproval(toolName)) {
+    const ctx = getContext()
+    const runMode = ctx.runMode
+    // plan 模式只读兜底：SDK permissionMode:'plan' 通常不调 canUseTool，此为防漏
+    if (runMode === 'plan') {
+      return { behavior: 'deny', message: '计划模式只读，不执行工具' }
+    }
+    // auto 走 SDK bypassPermissions，canUseTool 不被调；若 SDK 仍回调（如 AskUserQuestion
+    // 这类人交互工具），needsApproval('auto')=false → allow，工具照走、无人则报错模型自决
+    // 总是允许须在广播前拦截：request() 命中 isAlwaysAllowed 时早返回放行，不建 pending、
+    // 不广播 approval_settled —— 若先广播 approval_request，前端会留下永不结算的僵尸审批卡（点击 409）
+    if (!needsApproval(toolName, runMode) || approvals.isAlwaysAllowed(toolName)) {
       return { behavior: 'allow' }
     }
-    const ctx = getContext()
     broadcast(ctx, {
       event: 'approval_request',
       data: {
@@ -467,6 +489,35 @@ export function interruptSession(ctx: SessionContext): void {
   ctx.queryObj.interrupt().catch((err) => {
     ctx.sessionLogger.warn({ err }, 'interrupt 调用失败')
   })
+}
+
+/**
+ * 热切换执行模式（不重启进程、不重放历史）：
+ * - 更新 ctx.runMode，canUseTool 下次调用即按新档门禁（standard↔safe 同为 default 仅改此值）
+ * - permissionMode 变化时（auto=bypass / plan=plan / standard·safe=default 间切换）调 SDK setPermissionMode
+ * - 广播 run_mode 事件（多 tab 选择器同步）
+ * - idle 校验：turn 进行中/审批挂起中 409（防撕裂在途审批流）
+ */
+export async function setRunMode(ctx: SessionContext, mode: RunMode): Promise<void> {
+  if (ctx.state !== 'idle' && ctx.state !== 'starting') {
+    throw new AppError('AGENT_RUN_MODE_SWITCH_BUSY')
+  }
+  const prev = ctx.runMode
+  ctx.runMode = mode
+  ctx.lastActiveAt = Date.now()
+  // SDK permissionMode 切换：仅当目标档映射的 permissionMode 变化时调
+  // (auto↔其他 = bypass↔非bypass；plan↔其他；standard↔safe 同为 default 不调)
+  const prevPerm = permissionModeFor(prev)
+  const newPerm = permissionModeFor(mode)
+  if (prevPerm !== newPerm) {
+    try {
+      await ctx.queryObj.setPermissionMode(newPerm)
+    } catch (err) {
+      // SDK 调用失败不阻塞：ctx.runMode 已更新，下次新会话以 DB 值为准重建 permissionMode
+      ctx.sessionLogger.warn({ err, mode }, 'setPermissionMode 调用失败')
+    }
+  }
+  broadcast(ctx, { event: 'run_mode', data: { mode } })
 }
 
 // ===== 查询 =====

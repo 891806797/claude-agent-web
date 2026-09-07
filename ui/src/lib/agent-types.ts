@@ -50,6 +50,9 @@ export type ContentBlock =
 export type AgentStatus =
   'idle' | 'thinking' | 'responding' | 'tool-use' | 'awaiting-approval' | 'error'
 
+/** 执行模式（与后端 sse-events RunMode 同集） */
+export type RunMode = 'auto' | 'standard' | 'safe' | 'plan'
+
 export type ApprovalOutcome = 'allow' | 'deny' | 'timeout' | 'closed'
 
 export interface Usage {
@@ -123,6 +126,7 @@ export type SSEEvent =
   | { event: 'error'; data: { message: string } }
   | { event: 'turn_end'; data: { partial: boolean } }
   | { event: 'query_closed'; data: { reason: SessionCloseReason } }
+  | { event: 'run_mode'; data: { mode: RunMode } }
 
 export type SessionCloseReason =
   | 'user_close'
@@ -191,6 +195,12 @@ export interface Persona {
   updatedAt: string
 }
 
+/** 历史消息 + 事件锚点（ctx 活跃时 = 读 JSONL 完成时刻的 seq；attach 增量重放锚点，不活跃为 null） */
+export interface SessionHistory {
+  messages: ChatMessage[]
+  seq: number | null
+}
+
 export interface SessionSummary {
   id: string
   summary: string
@@ -211,6 +221,8 @@ export interface ActiveSession {
   state: 'starting' | 'idle' | 'turn-running' | 'closing' | 'closed'
   startedAt: number
   turns: number
+  /** 执行模式（活会话事实源；前端选择器校准） */
+  runMode: RunMode
   /** 会话绑定的智能体 id（绑定快照事实源；无绑定则缺省 = 标准 Claude） */
   personaId?: string
   /** 绑定名快照（persona 事后增删改不影响此值） */

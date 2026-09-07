@@ -6,6 +6,8 @@ import type {
   MoveResult,
   Persona,
   Project,
+  RunMode,
+  SessionHistory,
   SessionSummary,
   SlashCommand,
   UploadResult
@@ -50,6 +52,8 @@ export const agentApi = {
     firstMessage?: string
     /** 新会话选定的智能体 id（append 系统提示词）；缺省 = 标准 Claude。resume 不传（后端按绑定快照回填） */
     personaId?: string
+    /** 执行模式：新会话选定；resume 由 DB 快照回填不传。缺省 = standard */
+    runMode?: RunMode
     evict?: boolean
   }) =>
     api.post<{ sessionId: string; workspaceDir: string; evicted?: boolean }>(
@@ -59,7 +63,7 @@ export const agentApi = {
 
   // ---- 会话操作（header 协议）----
   getMessages: (sid: string, ws: string) =>
-    api.get<ChatMessage[]>(`${BASE}/session/messages`, { headers: sessionHeaders(sid, ws) }),
+    api.get<SessionHistory>(`${BASE}/session/messages`, { headers: sessionHeaders(sid, ws) }),
   sendMessage: (
     sid: string,
     ws: string,
@@ -98,6 +102,10 @@ export const agentApi = {
         headers: sessionHeaders(sid, ws)
       }
     ),
+
+  /** 热切换执行模式（仅 idle 可切；不重启进程，canUseTool 下次调用即按新档门禁） */
+  setRunMode: (sid: string, ws: string, runMode: RunMode) =>
+    api.put<void>(`${BASE}/session/run-mode`, { runMode }, { headers: sessionHeaders(sid, ws) }),
 
   // ---- 智能体定义 ----
   listPersonas: () => api.get<Persona[]>(`${BASE}/personas`),
@@ -143,9 +151,12 @@ export const agentApi = {
   ) => api.post<UploadResult>(`${BASE}/file/upload`, { projectId, dir, files }),
 
   /** SSE 端点 URL（EventSource 不支持自定义 header，sid/ws 走 query；
+   *  sinceSeq：首连增量重放锚点（断线重连由 EventSource 原生 Last-Event-ID header 接续）；
    *  EventSource 不经过 api.request，前缀需显式 withBase） */
-  eventsUrl: (sid: string, ws: string) =>
-    withBase(`${BASE}/session/events?sid=${sid}&ws=${encodeDir(ws)}`)
+  eventsUrl: (sid: string, ws: string, sinceSeq?: number) =>
+    withBase(
+      `${BASE}/session/events?sid=${sid}&ws=${encodeDir(ws)}${sinceSeq !== undefined ? `&sinceSeq=${sinceSeq}` : ''}`
+    )
 }
 
 export { ApiError }

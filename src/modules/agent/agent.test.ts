@@ -48,13 +48,24 @@ describe('ApprovalManager', () => {
     return { mgr, settled, sessionSignal }
   }
 
-  test('needsApproval：仅 Bash/PowerShell/AskUserQuestion', () => {
-    expect(needsApproval('Bash')).toBe(true)
-    expect(needsApproval('PowerShell')).toBe(true)
-    expect(needsApproval('AskUserQuestion')).toBe(true)
-    expect(needsApproval('Read')).toBe(false)
-    expect(needsApproval('Edit')).toBe(false)
-    expect(needsApproval('Write')).toBe(false)
+  test('needsApproval：按 runMode 分档（safe 命令+写+问卷；standard 仅问卷；auto/plan 无）', () => {
+    // safe：命令 + 文件写 + 问卷
+    expect(needsApproval('Bash', 'safe')).toBe(true)
+    expect(needsApproval('PowerShell', 'safe')).toBe(true)
+    expect(needsApproval('AskUserQuestion', 'safe')).toBe(true)
+    expect(needsApproval('Edit', 'safe')).toBe(true)
+    expect(needsApproval('Write', 'safe')).toBe(true)
+    expect(needsApproval('NotebookEdit', 'safe')).toBe(true)
+    expect(needsApproval('Read', 'safe')).toBe(false)
+    // standard：仅问卷
+    expect(needsApproval('Bash', 'standard')).toBe(false)
+    expect(needsApproval('Edit', 'standard')).toBe(false)
+    expect(needsApproval('AskUserQuestion', 'standard')).toBe(true)
+    // auto / plan：无（auto 的 AskUserQuestion 由 canUseTool 直接 deny）
+    expect(needsApproval('Bash', 'auto')).toBe(false)
+    expect(needsApproval('AskUserQuestion', 'auto')).toBe(false)
+    expect(needsApproval('Bash', 'plan')).toBe(false)
+    expect(needsApproval('AskUserQuestion', 'plan')).toBe(false)
   })
 
   test('resolve allow → onSettled(allow)', async () => {
@@ -319,5 +330,25 @@ describe('translateSessionStream', () => {
     expect(types).toContain('tool_call_start')
     expect(types).toContain('tool_call_args')
     expect(types).toContain('tool_call_end')
+  })
+
+  test('is_error result → 广播 error 事件（错误文本取 result 字段），先于 turn_end', async () => {
+    const { events } = await runTranslator([
+      { type: 'result', is_error: true, result: 'API Error: 403 invalid api-key', usage: {} },
+    ])
+    const errorIdx = events.findIndex((e) => e.event === 'error')
+    const turnEndIdx = events.findIndex((e) => e.event === 'turn_end')
+    expect(errorIdx).toBeGreaterThanOrEqual(0)
+    expect((events[errorIdx]!.data as { message?: string }).message).toBe(
+      'API Error: 403 invalid api-key',
+    )
+    // error 必须先于 turn_end：前端 turn_end 会把 status 重置 idle，靠 error 的 system 消息留存提示
+    expect(turnEndIdx).toBeGreaterThan(errorIdx)
+  })
+
+  test('is_error result 无 result 文本 → error 事件兜底文案', async () => {
+    const { events } = await runTranslator([{ type: 'result', is_error: true, usage: {} }])
+    const err = events.find((e) => e.event === 'error')
+    expect((err!.data as { message?: string }).message).toBe('本轮执行失败')
   })
 })

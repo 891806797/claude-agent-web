@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Attachment, Persona, SlashCommand } from '@/lib/agent-types'
+import type { Attachment, Persona, RunMode, SlashCommand } from '@/lib/agent-types'
 import { agentApi } from '@/lib/agent-api'
-import { ArrowUpIcon, FileIcon, SquareIcon, TerminalIcon, VenetianMaskIcon } from 'lucide-react'
+import {
+  ArrowUpIcon,
+  FileIcon,
+  ShieldCheckIcon,
+  SquareIcon,
+  TerminalIcon,
+  VenetianMaskIcon
+} from 'lucide-react'
 import {
   createChipSpan,
   createImageChipSpan,
@@ -36,6 +43,14 @@ export interface PromptInputProps {
   onOpenPersonas: () => void
   /** persona 选中（活会话且空闲 = 热切换，否则下次新会话生效；分流在上层） */
   onSelectPersona: (id: string | undefined) => void
+  /** 当前执行模式（store 单一事实源） */
+  runMode: RunMode
+  /** 执行模式显示名 */
+  runModeLabel: string
+  /** 执行模式选择器禁用（会话运行中/切换中：防撕裂在途审批流） */
+  runModeBusy: boolean
+  /** 执行模式选中（活会话且空闲 = 热切换，否则下次新会话生效） */
+  onSelectRunMode: (mode: RunMode) => void
   onSend: (message: string, attachments: Attachment[]) => void
   /** 中断当前进行中的 turn（保活会话） */
   onInterrupt: () => void
@@ -141,6 +156,10 @@ export function PromptInput(props: PromptInputProps): React.JSX.Element {
     personaBusy,
     onOpenPersonas,
     onSelectPersona,
+    runMode,
+    runModeLabel,
+    runModeBusy,
+    onSelectRunMode,
     onSend,
     onInterrupt
   } = props
@@ -171,6 +190,9 @@ export function PromptInput(props: PromptInputProps): React.JSX.Element {
   const [personaOpen, setPersonaOpen] = useState(false)
   const [personaQuery, setPersonaQuery] = useState('')
   const [personaActive, setPersonaActive] = useState(0)
+  const [runModeOpen, setRunModeOpen] = useState(false)
+  const [runModeQuery, setRunModeQuery] = useState('')
+  const [runModeActive, setRunModeActive] = useState(0)
 
   const filteredCommands = useMemo(() => {
     // menu 模式 query 来自搜索框；slash 模式 query 取自输入框 caret 前文本
@@ -209,6 +231,27 @@ export function PromptInput(props: PromptInputProps): React.JSX.Element {
       }))
     ]
   }, [personas, personaQuery])
+
+  const runModeItems = useMemo<
+    Array<{ value: RunMode; label: string; description: string }>
+  >(() => {
+    const q = runModeQuery.trim().toLowerCase()
+    const all: Array<{ value: RunMode; label: string; description: string }> = [
+      {
+        value: 'auto',
+        label: '全自动模式',
+        description: '无人值守，工具全放行，AskUserQuestion 自主决断'
+      },
+      { value: 'standard', label: '标准模式', description: '仅问卷走审批，命令/写文件直通' },
+      { value: 'safe', label: '安全模式', description: '命令 + 写文件 + 问卷均须审批' },
+      { value: 'plan', label: '计划模式', description: '只读模式，不执行任何工具，仅规划' }
+    ]
+    return q
+      ? all.filter(
+          (it) => it.label.toLowerCase().includes(q) || it.description.toLowerCase().includes(q)
+        )
+      : all
+  }, [runModeQuery])
 
   const adjustHasText = useCallback(() => {
     const root = rootRef.current
@@ -418,9 +461,28 @@ export function PromptInput(props: PromptInputProps): React.JSX.Element {
     [onSelectPersona]
   )
 
+  const selectRunModeItem = useCallback(
+    (value: RunMode): void => {
+      onSelectRunMode(value)
+      setRunModeOpen(false)
+      setRunModeActive(0)
+      rootRef.current?.focus()
+    },
+    [onSelectRunMode]
+  )
+
+  const openRunModeSelect = useCallback((): void => {
+    setMentionOpen(false)
+    setCommandOpen(false)
+    setPersonaOpen(false)
+    setRunModeOpen(true)
+    setRunModeActive(runModeItems.findIndex((it) => it.value === runMode))
+  }, [runModeItems, runMode])
+
   const openPersonaSelect = useCallback((): void => {
     setMentionOpen(false)
     setCommandOpen(false)
+    setRunModeOpen(false)
     setPersonaOpen(true)
     setPersonaQuery('')
     setPersonaActive(0)
@@ -430,6 +492,7 @@ export function PromptInput(props: PromptInputProps): React.JSX.Element {
   const openCommandMenu = useCallback((): void => {
     setMentionOpen(false)
     setPersonaOpen(false)
+    setRunModeOpen(false)
     setCommandTrigger('menu')
     setCommandMenuQuery('')
     setCommandActive(0)
@@ -477,6 +540,7 @@ export function PromptInput(props: PromptInputProps): React.JSX.Element {
     if (!projectId) return // 无项目不提供文件引用
     setCommandOpen(false)
     setPersonaOpen(false)
+    setRunModeOpen(false)
     setMentionTrigger('menu')
     setMentionMenuQuery('')
     setMentionActive(0)
@@ -562,6 +626,29 @@ export function PromptInput(props: PromptInputProps): React.JSX.Element {
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>): void => {
+      if (runModeOpen && runModeItems.length > 0) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault()
+          setRunModeActive((i) => (i + 1) % runModeItems.length)
+          return
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault()
+          setRunModeActive((i) => (i - 1 + runModeItems.length) % runModeItems.length)
+          return
+        }
+        if (e.key === 'Enter' || e.key === 'Tab') {
+          e.preventDefault()
+          const item = runModeItems[runModeActive]
+          if (item) selectRunModeItem(item.value)
+          return
+        }
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          setRunModeOpen(false)
+          return
+        }
+      }
       if (personaOpen && personaItems.length > 0) {
         if (e.key === 'ArrowDown') {
           e.preventDefault()
@@ -653,6 +740,10 @@ export function PromptInput(props: PromptInputProps): React.JSX.Element {
       }
     },
     [
+      runModeOpen,
+      runModeItems,
+      runModeActive,
+      selectRunModeItem,
       personaOpen,
       personaItems,
       personaActive,
@@ -766,6 +857,7 @@ export function PromptInput(props: PromptInputProps): React.JSX.Element {
       setMentionOpen(false)
       setCommandOpen(false)
       setPersonaOpen(false)
+      setRunModeOpen(false)
     }
     document.addEventListener('mousedown', onPointerDown)
     return () => document.removeEventListener('mousedown', onPointerDown)
@@ -862,7 +954,37 @@ export function PromptInput(props: PromptInputProps): React.JSX.Element {
             loadingText="加载智能体中…"
             emptyText="暂无智能体（可在管理页创建）"
           />
+          <ModelSelectorPopover
+            open={runModeOpen}
+            loading={false}
+            items={runModeItems}
+            selectedValue={runMode}
+            query={runModeQuery}
+            activeIndex={runModeActive}
+            onSelect={(v) => {
+              if (v) selectRunModeItem(v as RunMode)
+            }}
+            onQueryChange={setRunModeQuery}
+            onHover={setRunModeActive}
+            searchPlaceholder="搜索模式…"
+            loadingText="加载模式中…"
+            emptyText="无匹配模式"
+          />
           <div className="flex items-center gap-0.5">
+            <button
+              type="button"
+              onClick={openRunModeSelect}
+              disabled={runModeBusy}
+              className="flex h-6 items-center gap-1 rounded-md px-2 text-[11px] text-[var(--text-muted)] transition-colors hover:bg-[var(--overlay-hover)] disabled:text-[var(--text-faint)] disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              title={
+                runModeBusy
+                  ? '会话运行中，暂不能切换执行模式'
+                  : '选择执行模式（空闲会话立即热切换，新会话直接生效）'
+              }
+            >
+              <ShieldCheckIcon className="size-3" />
+              <span>{runModeLabel}</span>
+            </button>
             <button
               type="button"
               onClick={openPersonaSelect}

@@ -305,6 +305,12 @@ export function ChatMessageList({ agent }: ChatMessageListProps): React.JSX.Elem
         personaBusy={isRunning || isSwitchingSession}
         onOpenPersonas={loadPersonas}
         onSelectPersona={handleSelectPersona}
+        runMode={agent.runMode}
+        runModeLabel={agent.runModeLabel}
+        runModeBusy={isRunning || isSwitchingSession}
+        onSelectRunMode={(m) => {
+          void agent.selectRunMode(m).catch(() => {})
+        }}
         onSend={handleSend}
         onInterrupt={interruptRun}
       />

@@ -233,6 +233,16 @@ export async function translateSessionStream(
         }
         onEvent({ event: 'usage', data: u })
         await pushContextUsage()
+        // turn 失败（API key 失效/上游 4xx 等被 CLI 封装为 is_error result）：错误文本在 result
+        // 字段——必须广播 error（前端插红字 system 消息）；只发 status:'error' 会被随后的
+        // turn_end 重置回 idle，用户完全无感知
+        if (m.is_error) {
+          const text = (message as { result?: unknown }).result
+          onEvent({
+            event: 'error',
+            data: { message: typeof text === 'string' && text ? text : '本轮执行失败' },
+          })
+        }
         // 多 turn：turn_end 后 continue；interrupt 不 abort（partial=false），close abort（partial=true）
         finishMessage(abortController.signal.aborted)
         onEvent({ event: 'status', data: { status: m.is_error ? 'error' : 'idle' } })

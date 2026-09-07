@@ -5,6 +5,7 @@ import { openAgentSSE, type AgentSSE } from '@/lib/sse-client'
 import type {
   AgentStatus,
   PendingApproval,
+  RunMode,
   SequencedEvent,
   SessionCloseReason
 } from '@/lib/agent-types'
@@ -13,7 +14,9 @@ import type {
  * 聊天代理编排 hook —— SSE 生命周期 + 统一接入模型 + 会话操作。
  *
  * 统一接入模型：刷新/服务重启/GC 回归三种场景同一代码路径——
- *   attachActive(ws,sid) 命中本人活跃会话 → 直连 SSE（缓冲重放近期事件，不 loadHistory 防重复）；
+ *   attachActive(ws,sid) 命中本人活跃会话 → getMessages 全量 loadHistory + 以响应 seq 为锚
+ *   SSE 增量重放（sinceSeq）：已落盘事件不重放（无重复）、锚点后事件必在缓冲（无缺口），
+ *   不再依赖缓冲重放重建消息（ctx 被 resume 重建后缓冲近空 → 空白；长会话缓冲滚动 → 头部截断）；
  *   未命中 → resume(projectId,sid) openSession({resume}) → loadHistory(JSONL) + 连 SSE（新进程无缓冲重叠）。
  *
  * seq 幂等：EventSource 原生 Last-Event-ID 让服务端增量重放；本地 lastSeq 兜底过滤重连竞态导致的
@@ -48,6 +51,9 @@ export function useChatAgent() {
   // 的代际，返回时发现已被更新操作取代即丢弃 -- 防止慢请求把老会话消息写入新会话视图
   // （如 resume 进行中点"创建会话"，迟到的 loadHistory 整段覆盖新会话）。
   const genRef = useRef(0)
+  /** 锚定 attach 后待一次历史自愈刷新：attach 时刻正流式的消息不在 JSONL、事件 seq ≤ 锚点被
+   *  过滤 → 本轮缺失；turn_end 后 JSONL 已补全，刷新一次闭环（不动 lastSeq，后续事件正常）。 */
+  const pendingHistoryRefresh = useRef(false)
   const [ws, setWs] = useState<string | null>(null)
   const [sid, setSid] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -142,13 +148,15 @@ export function useChatAgent() {
   )
 
   const startSse = useCallback(
-    (workspaceDir: string, sessionId: string, opts?: { keepSeq?: boolean }) => {
+    (workspaceDir: string, sessionId: string, opts?: { keepSeq?: boolean; sinceSeq?: number }) => {
       closeSse()
-      // 默认重置（resume/openNew 是新进程，seq 从头计）；attach 重连保留 ——
-      // 同一会话 seq 延续，服务端全量缓冲重放经 seq 幂等过滤零重复（StrictMode 双执行/重连安全）
-      if (!opts?.keepSeq) lastSeq.current = 0
+      // sinceSeq：以历史快照 seq 为锚增量重放（attach/resume 锚定路径，覆盖 keepSeq）；
+      // 默认重置（openNew/evict 恢复是新进程，seq 从头计，全量重放无重复）；
+      // keepSeq：同会话重连保留本地游标（服务端全量重放经 seq 幂等过滤零重复）
+      if (opts?.sinceSeq !== undefined) lastSeq.current = opts.sinceSeq
+      else if (!opts?.keepSeq) lastSeq.current = 0
       const gen = genRef.current
-      const sse = openAgentSSE(agentApi.eventsUrl(sessionId, workspaceDir), {
+      const sse = openAgentSSE(agentApi.eventsUrl(sessionId, workspaceDir, opts?.sinceSeq), {
         onEvent: (ev) => {
           // 本连接所属代际已被取代（用户已切走）：丢弃事件防写入新会话视图
           if (genRef.current !== gen) return
@@ -171,14 +179,14 @@ export function useChatAgent() {
             reconciling.current = true
             void agentApi
               .getMessages(sessionId, workspaceDir)
-              .catch(() => [])
+              .catch(() => null)
               .then((history) => {
                 // 对账请求期间用户已切换会话：丢弃迟到快照，复位标志交由新连接接管
                 if (genRef.current !== gen) {
                   reconciling.current = false
                   return
                 }
-                loadHistory(history, sessionId)
+                loadHistory(history?.messages ?? [], sessionId)
                 lastSeq.current = ev.seq
                 applyEvent(ev)
                 reconciling.current = false
@@ -194,6 +202,16 @@ export function useChatAgent() {
             return
           }
           applyEvent(ev)
+          // 锚定 attach 的自愈刷新（见 pendingHistoryRefresh 声明处注释）：turn_end 时 JSONL 已补全
+          if (ev.event === 'turn_end' && pendingHistoryRefresh.current) {
+            pendingHistoryRefresh.current = false
+            void agentApi
+              .getMessages(sessionId, workspaceDir)
+              .catch(() => null)
+              .then((h) => {
+                if (h && genRef.current === gen) loadHistory(h.messages, sessionId)
+              })
+          }
         },
         onApprovalReplay: (p: PendingApproval) => {
           const cur = useChatStore.getState().approvals
@@ -218,7 +236,8 @@ export function useChatAgent() {
 
   // ===== 统一接入 =====
 
-  /** 命中本人活跃会话则直连 SSE（缓冲重放，不 loadHistory）；否则返回 false 供调用方 resume */
+  /** 命中本人活跃会话 → getMessages 全量 loadHistory + 以响应 seq 为锚 SSE 增量重放；
+   *  否则返回 false 供调用方 resume */
   const attachActive = useCallback(
     async (workspaceDir: string, sid: string): Promise<boolean> => {
       const gen = ++genRef.current
@@ -227,12 +246,17 @@ export function useChatAgent() {
       if (res.active && res.active.sessionId === sid) {
         setWs(workspaceDir)
         setSid(sid)
-        startSse(workspaceDir, sid, { keepSeq: true })
+        const history = await agentApi.getMessages(sid, workspaceDir)
+        if (genRef.current !== gen) return false
+        loadHistory(history.messages, sid)
+        pendingHistoryRefresh.current = true
+        // seq null（极窄竞态 ctx 已死）→ 无锚全量重放；ctx 死则 SSE 连不上，重放不会发生
+        startSse(workspaceDir, sid, history.seq !== null ? { sinceSeq: history.seq } : undefined)
         return true
       }
       return false
     },
-    [startSse]
+    [startSse, loadHistory]
   )
 
   /** resume 历史会话（空闲回收/服务重启后无感恢复）；busy 覆盖全程（isSwitchingSession 数据源） */
@@ -254,10 +278,15 @@ export function useChatAgent() {
         setSid(outcome.sessionId)
         const history = await agentApi
           .getMessages(outcome.sessionId, outcome.workspaceDir)
-          .catch(() => [])
+          .catch(() => null)
         if (genRef.current !== gen) return
-        loadHistory(history, outcome.sessionId)
-        startSse(outcome.workspaceDir, outcome.sessionId)
+        loadHistory(history?.messages ?? [], outcome.sessionId)
+        // 新 ctx seq 从头，锚定（快照后事件增量重放）等价全量且防进程重建竞态下的缓冲重复
+        startSse(
+          outcome.workspaceDir,
+          outcome.sessionId,
+          history?.seq != null ? { sinceSeq: history.seq } : undefined
+        )
       } finally {
         if (genRef.current === gen) setBusy(false)
       }
@@ -267,7 +296,13 @@ export function useChatAgent() {
 
   /** 开新会话（可选首条消息）；busy 覆盖全程。personaId 仅在此入口生效（resume 走后端绑定快照） */
   const openNew = useCallback(
-    async (projectId: string, firstMessage?: string, evict?: boolean, personaId?: string) => {
+    async (
+      projectId: string,
+      firstMessage?: string,
+      evict?: boolean,
+      personaId?: string,
+      runMode?: RunMode
+    ) => {
       const gen = ++genRef.current
       setBusy(true)
       try {
@@ -276,10 +311,12 @@ export function useChatAgent() {
         closeSse()
         dropChunks()
         reset()
+        if (runMode) useChatStore.setState({ runMode })
         const outcome = await agentApi.openSession({
           projectId,
           firstMessage,
           ...(personaId ? { personaId } : {}),
+          ...(runMode ? { runMode } : {}),
           ...(evict ? { evict: true } : {})
         })
         if (genRef.current !== gen) return null
@@ -313,10 +350,14 @@ export function useChatAgent() {
         setSid(outcome.sessionId)
         const history = await agentApi
           .getMessages(outcome.sessionId, outcome.workspaceDir)
-          .catch(() => [])
+          .catch(() => null)
         if (genRef.current !== gen) return
-        loadHistory(history, outcome.sessionId)
-        startSse(outcome.workspaceDir, outcome.sessionId)
+        loadHistory(history?.messages ?? [], outcome.sessionId)
+        startSse(
+          outcome.workspaceDir,
+          outcome.sessionId,
+          history?.seq != null ? { sinceSeq: history.seq } : undefined
+        )
       } finally {
         if (genRef.current === gen) setBusy(false)
       }
@@ -357,20 +398,32 @@ export function useChatAgent() {
     await agentApi.interrupt(sid, ws).catch(() => {})
   }, [ws, sid])
 
+  /** 热切换执行模式（不重启进程；store 由 SSE run_mode 事件回灌校准） */
+  const setRunMode = useCallback(
+    async (mode: RunMode) => {
+      if (!ws || !sid) return
+      await agentApi.setRunMode(sid, ws, mode)
+    },
+    [ws, sid]
+  )
+
   /** 回滚文件到 checkpoint（user message uuid），随后重载历史 */
   const rewind = useCallback(
     async (messageId: string) => {
       if (!ws || !sid) return
       await agentApi.rewind(sid, ws, messageId)
-      const history = await agentApi.getMessages(sid, ws).catch(() => [])
-      loadHistory(history, sid)
+      const history = await agentApi.getMessages(sid, ws).catch(() => null)
+      loadHistory(history?.messages ?? [], sid)
     },
     [ws, sid, loadHistory]
   )
 
   const closeSession = useCallback(async () => {
     if (!ws || !sid) return
+    // gen++ 使在飞 resume/openNew 的 finally 跳过 setBusy(false)（由取代者负责），
+    // closeSession 是终结者而非新操作 → 必须就地兜底，否则 busy 永久泄漏
     genRef.current++
+    setBusy(false)
     await agentApi.closeSession(sid, ws).catch(() => {})
     closeSse()
     reset()
@@ -402,6 +455,7 @@ export function useChatAgent() {
     send,
     approve,
     interrupt,
+    setRunMode,
     rewind,
     closeSession
   }

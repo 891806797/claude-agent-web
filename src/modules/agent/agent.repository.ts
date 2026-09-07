@@ -4,9 +4,11 @@ import {
   type AgentPersonaRow,
   type AgentProjectRow,
   type AgentSessionPersonaRow,
+  type AgentSessionRunModeRow,
   agentPersonas,
   agentProjects,
   agentSessionPersonas,
+  agentSessionRunModes,
   agentSessionStats,
 } from './agent.table'
 
@@ -218,5 +220,34 @@ export const agentRepository = {
       .select()
       .from(agentSessionPersonas)
       .where(inArray(agentSessionPersonas.sessionId, sessionIds))
+  },
+
+  // ===== 会话执行模式快照 =====
+
+  /** upsert：热切换/resume 回填覆盖写（幂等；以最后一次生效为准） */
+  async upsertRunMode(
+    executor: DbExecutor,
+    data: { sessionId: string; runMode: string },
+  ): Promise<void> {
+    await executor
+      .insert(agentSessionRunModes)
+      .values(data)
+      .onConflictDoUpdate({
+        target: agentSessionRunModes.sessionId,
+        set: { runMode: data.runMode, updatedAt: new Date() },
+      })
+  },
+
+  /** resume 回填用；无行 = 老/新会话缺省 standard */
+  async findRunMode(
+    executor: DbExecutor,
+    sessionId: string,
+  ): Promise<AgentSessionRunModeRow | undefined> {
+    const [row] = await executor
+      .select()
+      .from(agentSessionRunModes)
+      .where(eq(agentSessionRunModes.sessionId, sessionId))
+      .limit(1)
+    return row
   },
 }

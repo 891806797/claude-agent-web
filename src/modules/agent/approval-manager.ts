@@ -1,19 +1,27 @@
-import type { ApprovalOutcome } from './sse-events'
+import type { ApprovalOutcome, RunMode } from './sse-events'
 
 /** 审批挂起时长（与 SDK 工具级 signal 共同决定 canUseTool 的返回时机）；approval_request 广播同口径换算 expiresAt */
 export const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000
 
 /**
- * 需人工审批的工具集（用户拍板的放宽粒度）：
- * - 命令类 Bash / PowerShell —— 弹「同意/拒绝/总是允许」卡，允许编辑 command
+ * safe 模式须人工审批的工具集（命令 + 文件写 + 问卷）：
+ * - Bash / PowerShell —— 弹「同意/拒绝/总是允许」卡，允许编辑 command
+ * - Edit / Write / NotebookEdit —— 文件写操作，弹 allow/deny 卡（不改性）
  * - AskUserQuestion —— 走同一挂起链路（问卷语义，见 canUseTool 调用点）
- * Edit/Write/NotebookEdit 等文件工具与只读工具一律直接放行，不产生审批卡。
+ * 只读工具（Read/Grep/Glob 等）一律直接放行。
  */
-const APPROVAL_TOOLS = new Set(['Bash', 'PowerShell'])
+const SAFE_GATE_TOOLS = new Set(['Bash', 'PowerShell', 'Edit', 'Write', 'NotebookEdit'])
 
-/** 是否需要走人工审批（canUseTool 调用点用） */
-export function needsApproval(toolName: string): boolean {
-  return toolName === 'AskUserQuestion' || APPROVAL_TOOLS.has(toolName)
+/**
+ * 是否需要走人工审批（canUseTool 调用点用；按 runMode 分档）：
+ * - safe：命令 + 文件写 + AskUserQuestion
+ * - standard：仅 AskUserQuestion（命令/写文件直通）
+ * - auto / plan：无（auto 的 AskUserQuestion 由 canUseTool 直接 deny；plan 工具不执行）
+ */
+export function needsApproval(toolName: string, runMode: RunMode): boolean {
+  if (runMode === 'safe') return toolName === 'AskUserQuestion' || SAFE_GATE_TOOLS.has(toolName)
+  if (runMode === 'standard') return toolName === 'AskUserQuestion'
+  return false
 }
 
 export interface ApprovalDecision {

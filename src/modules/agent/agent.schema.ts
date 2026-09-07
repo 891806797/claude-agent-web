@@ -95,6 +95,8 @@ export const OpenSessionInput = z.object({
   personaId: z.string().uuid().optional(),
   /** 同目录被自己占用时原子关旧开新（切换确认后携带） */
   evict: z.boolean().optional(),
+  /** 执行模式：新会话选定；resume 由 DB 快照回填，此字段仅新会话生效。缺省 = standard */
+  runMode: z.enum(['auto', 'standard', 'safe', 'plan']).optional(),
 })
 
 export const OpenSessionResult = z.object({
@@ -119,6 +121,18 @@ export const SwitchPersonaInput = z.object({
 })
 
 export type SwitchPersonaData = z.infer<typeof SwitchPersonaInput>
+
+// ===== 会话切换执行模式 =====
+
+/** 执行模式枚举（与 sse-events RunMode 同集） */
+export const RunModeEnum = z.enum(['auto', 'standard', 'safe', 'plan'])
+
+/** 热切换执行模式（仅 idle 可切；不重启进程，canUseTool 下次调用即按新档门禁） */
+export const SwitchRunModeInput = z.object({
+  runMode: RunModeEnum.openapi({ example: 'standard', description: '执行模式' }),
+})
+
+export type SwitchRunModeData = z.infer<typeof SwitchRunModeInput>
 
 // ===== 发消息 =====
 
@@ -192,6 +206,8 @@ export const ActiveSessionDto = z
     state: SessionStateEnum,
     startedAt: z.number().openapi({ description: 'epoch ms' }),
     turns: z.number(),
+    /** 执行模式（活会话事实源；前端选择器校准） */
+    runMode: RunModeEnum,
     /** 会话绑定的智能体 id（绑定快照事实源；无绑定则缺省 = 标准 Claude） */
     personaId: z.string().uuid().optional(),
     /** 绑定名快照（persona 事后增删改不影响此值） */

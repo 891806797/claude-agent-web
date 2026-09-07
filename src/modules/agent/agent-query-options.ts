@@ -2,6 +2,7 @@ import type { Options } from '@anthropic-ai/claude-agent-sdk'
 import type { Logger } from 'pino'
 import { env } from '@/env'
 import { getCliPath } from './cli-path'
+import type { RunMode } from './sse-events'
 import { userConfigDir } from './user-config'
 
 /**
@@ -25,13 +26,23 @@ export interface SessionQueryParams {
   resume?: string
   /** 追加到 claude_code 预设后的系统提示词（persona 注入；缺省 = 标准 Claude） */
   appendSystemPrompt?: string
+  /** 执行模式（plan → SDK permissionMode:'plan' 只读；其余 'default'，由 canUseTool 分档） */
+  runMode?: RunMode
   abortController: AbortController
   canUseTool: CanUseToolFn
   sessionLogger: Logger
 }
 
+/** runMode → SDK permissionMode 映射（auto 走真实 bypass；plan 只读；standard/safe 走 default + canUseTool 分档） */
+export function permissionModeFor(runMode: RunMode): 'default' | 'plan' | 'bypassPermissions' {
+  if (runMode === 'plan') return 'plan'
+  if (runMode === 'auto') return 'bypassPermissions'
+  return 'default'
+}
+
 /** 正式会话 options（streaming-input 常驻模式） */
 export function buildSessionQueryOptions(params: SessionQueryParams): Options {
+  const runMode = params.runMode ?? 'standard'
   return {
     ...baseOptions(params.username, params.cwd, params.sessionLogger),
     abortController: params.abortController,
@@ -48,7 +59,11 @@ export function buildSessionQueryOptions(params: SessionQueryParams): Options {
           } satisfies NonNullable<Options['systemPrompt']>,
         }
       : {}),
-    permissionMode: 'default',
+    // auto → bypassPermissions（真实绕过 canUseTool；AskUserQuestion 工具照走，无人则报错模型自决）
+    // plan → 只读；standard/safe → default（canUseTool 分档门禁）
+    permissionMode: permissionModeFor(runMode),
+    // 始终开启：auto 运行时热切换到 bypassPermissions 需此闸（仅许可，不影响 default 下 canUseTool 门禁）
+    allowDangerouslySkipPermissions: true,
     canUseTool: params.canUseTool,
   }
 }

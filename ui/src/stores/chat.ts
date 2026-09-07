@@ -5,6 +5,7 @@ import type {
   ContextUsage,
   ContentBlock,
   PendingApproval,
+  RunMode,
   SequencedEvent,
   SessionCloseReason,
   SubagentInfo,
@@ -39,6 +40,8 @@ interface ChatState {
   activeToolCall: { id: string; name: string } | null
   /** 最近一次 error 事件消息；发新消息时清空 */
   lastError: string | null
+  /** 执行模式（活会话事实源；run_mode SSE 事件 + getActiveSession 回读校准；默认 standard） */
+  runMode: RunMode
   /** 最近一次 checkpoint（user message uuid，用于 rewindFiles 回滚） */
   lastCheckpoint: string | null
   /** 活跃子代理进度（按 toolUseId 内联到对应 tool_use block 渲染；done 即移除） */
@@ -77,6 +80,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   contextUsage: null,
   activeToolCall: null,
   lastError: null,
+  runMode: 'standard',
   lastCheckpoint: null,
   subagentByToolUse: {},
   toolArgBuf: {},
@@ -96,6 +100,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       contextUsage: null,
       activeToolCall: null,
       lastError: null,
+      runMode: 'standard',
       subagentByToolUse: {},
       toolArgBuf: {},
       messageIndex: {},
@@ -186,6 +191,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
     if (event === 'query_closed') {
       set({ closed: { reason: (data as { reason: SessionCloseReason }).reason } })
+      return
+    }
+    if (event === 'run_mode') {
+      set({ runMode: (data as { mode: RunMode }).mode })
       return
     }
     if (event === 'approval_request') {

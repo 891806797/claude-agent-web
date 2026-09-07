@@ -30,6 +30,7 @@ import {
   SessionSummaryDto,
   SlashCommandDto,
   SwitchPersonaInput,
+  SwitchRunModeInput,
   UpdatePersonaInput,
   UploadFilesInput,
   UploadFilesResult,
@@ -145,10 +146,16 @@ const getMessagesRoute = createRoute({
   method: 'get',
   path: '/session/messages',
   tags: ['agent-session'],
-  summary: '历史消息（ChatMessage[]，与流式渲染同构）',
+  summary:
+    '历史消息（ChatMessage[]，与流式渲染同构）+ 事件锚点 seq（ctx 活跃时非空，attach 增量重放用）',
   request: { headers: SessionHeaders },
   responses: {
-    200: jsonResponse(ApiResponseSchema(z.array(ChatMessageDto)), '成功'),
+    200: jsonResponse(
+      ApiResponseSchema(
+        z.object({ messages: z.array(ChatMessageDto), seq: z.number().nullable() }),
+      ),
+      '成功',
+    ),
     404: jsonResponse(ErrorResponseSchema, '会话不存在'),
   },
 })
@@ -322,6 +329,22 @@ const switchPersonaRoute = createRoute({
   responses: {
     200: jsonResponse(ApiResponseSchema(OpenSessionResult), '已切换（进程已替换）'),
     404: jsonResponse(ErrorResponseSchema, '会话不存在 / 智能体不存在'),
+    409: jsonResponse(ErrorResponseSchema, '会话忙碌（思考/审批中）'),
+  },
+})
+
+const switchRunModeRoute = createRoute({
+  method: 'put',
+  path: '/session/run-mode',
+  tags: ['agent-session'],
+  summary: '热切换执行模式（仅 idle 可切；不重启进程，canUseTool 下次调用即按新档门禁）',
+  request: {
+    headers: SessionHeaders,
+    body: { required: true, content: { 'application/json': { schema: SwitchRunModeInput } } },
+  },
+  responses: {
+    204: NoContent,
+    404: jsonResponse(ErrorResponseSchema, '会话不存在'),
     409: jsonResponse(ErrorResponseSchema, '会话忙碌（思考/审批中）'),
   },
 })
@@ -626,6 +649,17 @@ export function registerAgentRoutes(app: App): void {
     )
   })
 
+  app.openapi(switchRunModeRoute, async (c) => {
+    const h = c.req.valid('header')
+    await agentService.setRunMode(
+      c.get('username'),
+      headerWorkspaceDir(h['x-workspace-dir']),
+      h['x-session-id'],
+      c.req.valid('json'),
+    )
+    return c.body(null, 204)
+  })
+
   // ---- 探测 ----
   app.openapi(commandsRoute, async (c) => {
     return ok(c, await agentService.getCommands(c.get('username'), c.req.valid('query').projectId))
@@ -680,8 +714,14 @@ export function registerAgentRoutes(app: App): void {
     const ctx = requireSessionCtx(username, ws, sid)
     registry.touchSession(ctx)
 
+    // seq 锚点优先级：Last-Event-ID header（EventSource 原生断线重连）> query sinceSeq（首连增量重放）> null 全量
     const lastEventId = Number.parseInt(c.req.header('Last-Event-ID') ?? '', 10)
-    const lastSeq = Number.isNaN(lastEventId) ? null : lastEventId
+    const sinceSeqParam = Number.parseInt(c.req.query('sinceSeq') ?? '', 10)
+    const lastSeq = Number.isNaN(lastEventId)
+      ? Number.isNaN(sinceSeqParam)
+        ? null
+        : sinceSeqParam
+      : lastEventId
 
     return streamSSE(c, async (stream) => {
       let closed = false

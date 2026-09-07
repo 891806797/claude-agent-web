@@ -40,6 +40,17 @@ export const agentSessionPersonas = appSchema.table('agent_session_personas', {
   systemPrompt: text('system_prompt').notNull(),
 })
 
+/**
+ * 会话执行模式快照（resume 重开时回填 ctx.runMode，与 persona 正交）。
+ * run_mode: auto | standard | safe | plan；缺省 standard（新会话默认）。
+ */
+export const agentSessionRunModes = appSchema.table('agent_session_run_modes', {
+  /** SDK 会话 id（resume 回填的键；一个会话至多一条） */
+  sessionId: text('session_id').primaryKey(),
+  runMode: text('run_mode').notNull().default('standard'),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
 export const agentSessionStats = appSchema.table(
   'agent_session_stats',
   {
@@ -64,3 +75,4 @@ export type AgentProjectRow = typeof agentProjects.$inferSelect
 export type AgentSessionStatsRow = typeof agentSessionStats.$inferSelect
 export type AgentPersonaRow = typeof agentPersonas.$inferSelect
 export type AgentSessionPersonaRow = typeof agentSessionPersonas.$inferSelect
+export type AgentSessionRunModeRow = typeof agentSessionRunModes.$inferSelect

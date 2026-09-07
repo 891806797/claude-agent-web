@@ -9,6 +9,7 @@ import type {
   ChatMessage,
   ContextUsage,
   Persona,
+  RunMode,
   SessionCloseReason,
   SlashCommand,
   Usage
@@ -65,6 +66,12 @@ export interface ChatAgentApi {
   selectPersona: (id: string | undefined) => Promise<void>
   /** persona 列表刷新（popover 打开时调用，保持选择器永远新鲜） */
   loadPersonas: () => void
+  /** 执行模式（活会话 = 已生效；store 单一事实源，SSE run_mode 事件回灌校准） */
+  runMode: RunMode
+  /** 执行模式显示名 */
+  runModeLabel: string
+  /** 选择执行模式：活会话且空闲 → 热切换（不重启进程）；否则纯选择（下次新会话生效） */
+  selectRunMode: (mode: RunMode) => Promise<void>
   /** 本 turn 累计用量（CostCircle 环形图数据源） */
   usage: Usage | null
   /** 最近一次 context_usage 快照（CostCircle 下拉明细） */
@@ -105,6 +112,7 @@ export function useChatAgentApi(opts: { projectId: string | null }): ChatAgentAp
   const activeTool = useChatStore((s) => s.activeToolCall)
   const lastError = useChatStore((s) => s.lastError)
   const usage = useChatStore((s) => s.usage)
+  const runMode = useChatStore((s) => s.runMode)
   const reset = useChatStore((s) => s.reset)
 
   const [commands, setCommands] = useState<SlashCommand[]>([])
@@ -136,6 +144,7 @@ export function useChatAgentApi(opts: { projectId: string | null }): ChatAgentAp
       if (res.active) {
         setPersonaId(res.active.personaId)
         setPersonaFallbackName(res.active.personaName)
+        useChatStore.setState({ runMode: res.active.runMode })
       }
     } catch {
       /* 校准失败保留现值（仅显示滞后，注入以服务端为准） */
@@ -203,12 +212,23 @@ export function useChatAgentApi(opts: { projectId: string | null }): ChatAgentAp
       feedback?: string,
       alwaysAllow?: boolean
     ) => {
-      await agent.approve(toolCallId, {
-        allowed,
-        ...(modifiedInput ? { updatedInput: modifiedInput } : {}),
-        ...(feedback ? { feedback } : {}),
-        ...(alwaysAllow ? { alwaysAllow } : {})
-      })
+      // 409 = 审批已被处理（双击 / 僵尸卡）：服务端已结算，本地移除卡片防永久滞留
+      try {
+        await agent.approve(toolCallId, {
+          allowed,
+          ...(modifiedInput ? { updatedInput: modifiedInput } : {}),
+          ...(feedback ? { feedback } : {}),
+          ...(alwaysAllow ? { alwaysAllow } : {})
+        })
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) {
+          useChatStore.setState((st) => ({
+            approvals: st.approvals.filter((a) => a.toolCallId !== toolCallId)
+          }))
+          return
+        }
+        throw err
+      }
     },
     [agent]
   )
@@ -237,9 +257,9 @@ export function useChatAgentApi(opts: { projectId: string | null }): ChatAgentAp
 
   const openNewSession = useCallback(
     async (projectId: string, evict?: boolean) => {
-      return agent.openNew(projectId, undefined, evict, personaId)
+      return agent.openNew(projectId, undefined, evict, personaId, runMode)
     },
-    [agent, personaId]
+    [agent, personaId, runMode]
   )
 
   const isRunning =
@@ -267,6 +287,31 @@ export function useChatAgentApi(opts: { projectId: string | null }): ChatAgentAp
   const personaLabel = personaId
     ? (personas.find((p) => p.id === personaId)?.name ?? personaFallbackName ?? '智能体')
     : '标准'
+
+  /** 执行模式选择：活会话且空闲 → 热切换（不重启进程，SSE run_mode 事件回灌校准）；
+   *  否则纯本地（下次新会话生效）。切换失败上抛 toast */
+  const selectRunMode = useCallback(
+    async (mode: RunMode): Promise<void> => {
+      if (agent.sid && !isRunning && !agent.busy) {
+        await agent.setRunMode(mode)
+        // 同会话热切换不触发 ws/sid 变化，store 由 SSE run_mode 事件回灌；
+        // 乐观更新兜底（事件丢失时 UI 不滞后）
+        useChatStore.setState({ runMode: mode })
+        return
+      }
+      useChatStore.setState({ runMode: mode })
+    },
+    [agent, isRunning]
+  )
+
+  const runModeLabel =
+    runMode === 'auto'
+      ? '全自动'
+      : runMode === 'safe'
+        ? '安全'
+        : runMode === 'plan'
+          ? '计划'
+          : '标准'
 
   const attachExisting = useCallback(
     async (workspaceDir: string, sid: string) => agent.attachActive(workspaceDir, sid),
@@ -296,6 +341,9 @@ export function useChatAgentApi(opts: { projectId: string | null }): ChatAgentAp
       personasLoading,
       selectPersona,
       loadPersonas,
+      runMode,
+      runModeLabel,
+      selectRunMode,
       usage,
       contextUsage,
       sendMessage,
@@ -322,6 +370,9 @@ export function useChatAgentApi(opts: { projectId: string | null }): ChatAgentAp
       personasLoading,
       selectPersona,
       loadPersonas,
+      runMode,
+      runModeLabel,
+      selectRunMode,
       usage,
       contextUsage,
       sendMessage,
