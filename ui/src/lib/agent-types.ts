@@ -77,6 +77,19 @@ export interface SubagentInfo {
   status?: 'completed' | 'failed' | 'stopped'
 }
 
+/** 子代理内部上下文事件（一条 content block 一事件，按 parentToolUseId 归桶为活动流） */
+export interface SubagentContextEvent {
+  parentToolUseId: string
+  kind: 'thinking' | 'text' | 'tool_use' | 'tool_result'
+  text?: string
+  toolCallId?: string
+  name?: string
+  input?: unknown
+  content?: string
+  error?: boolean
+  messageId?: string
+}
+
 export interface PendingApproval {
   toolCallId: string
   toolName: string
@@ -118,6 +131,7 @@ export type SSEEvent =
   | { event: 'message_end'; data: { messageId: string; partial?: boolean } }
   | { event: 'usage'; data: Usage }
   | { event: 'subagent_progress'; data: SubagentInfo }
+  | { event: 'subagent_context'; data: SubagentContextEvent }
   | { event: 'context_usage'; data: { context: ContextUsage } }
   | {
       event: 'compaction'

@@ -49,13 +49,17 @@ export function buildSessionQueryOptions(params: SessionQueryParams): Options {
     ...(params.sessionId ? { sessionId: params.sessionId } : {}),
     ...(params.resume ? { resume: params.resume } : {}),
     // persona：append 到 claude_code 预设后（保留完整工具规范/代码能力，仅追加自定义人格），
-    // 覆盖 baseOptions 的无 append 形态；probe 探测不经此路径
+    // 覆盖 baseOptions 的无 append 形态；probe 探测不经此路径。
+    // snapshot:false——CLI 2.1.268+ 默认录制 systemPrompt 快照，resume 重发已记录的旧 prompt、
+    // 忽略新 append。人格切换（switchSessionPersona）正是"同 sid resume 换 append"，快照会让
+    // 新人格静默失效。显式关闭录制，每次按当前 append 重新渲染，保证切人格生效。
     ...(params.appendSystemPrompt
       ? {
           systemPrompt: {
             type: 'preset',
             preset: 'claude_code',
             append: params.appendSystemPrompt,
+            snapshot: false,
           } satisfies NonNullable<Options['systemPrompt']>,
         }
       : {}),
@@ -87,6 +91,10 @@ function baseOptions(username: string, cwd: string | undefined, sessionLogger: L
     settingSources: ['project', 'local'],
     includePartialMessages: true,
     agentProgressSummaries: true,
+    // 透传子代理 text/thinking/tool_use/tool_result 为带 parent_tool_use_id 的完整消息，
+    // translator 据此翻译 subagent_context 事件供前端活动面板渲染。与 agentProgressSummaries 并存
+    // （摘要给状态/lastTool/summary，透传给内部内容块）。partial 流仍只属主会话。
+    forwardSubagentText: true,
     // 注意：enableFileCheckpointing 在 streaming-input 模式下会让 CLI 等 stdin 首条 user message
     // 才发 SessionStart（实测空开会话 0 输出 45s 超时死锁）。rewindFiles 依赖它；若需回滚能力，
     // 须改为"带首条消息开会话"流程（对齐 desktop），暂禁用以保证会话可创建。

@@ -8,6 +8,7 @@ import type {
   RunMode,
   SequencedEvent,
   SessionCloseReason,
+  SubagentContextEvent,
   SubagentInfo,
   Usage
 } from '@/lib/agent-types'
@@ -46,6 +47,12 @@ interface ChatState {
   lastCheckpoint: string | null
   /** 活跃子代理进度（按 toolUseId 内联到对应 tool_use block 渲染；done 即移除） */
   subagentByToolUse: Record<string, SubagentInfo>
+  /**
+   * 子代理内部上下文活动流（按 parentToolUseId 归桶）。
+   * forwardSubagentText 透传的 thinking/text/tool_use/tool_result 完整消息翻译而来，
+   * 每条 block 一事件，顺序追加。完成后不清除（保留可回看），仅 reset/loadHistory 清空。
+   */
+  subagentContextByToolUse: Record<string, SubagentContextEvent[]>
   /** toolCallId → 待解析参数缓冲（tool_call_end 时 JSON.parse） */
   toolArgBuf: Record<string, string>
   /** messageId → messages 下标（流式 chunk O(1) 定位） */
@@ -83,6 +90,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   runMode: 'standard',
   lastCheckpoint: null,
   subagentByToolUse: {},
+  subagentContextByToolUse: {},
   toolArgBuf: {},
   messageIndex: {},
   toolUsePos: {},
@@ -119,7 +127,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
           })
         }
       })
-      return { messages: msgs, messageIndex, toolUsePos, sessionId, status: 'idle' as const }
+      return {
+        messages: msgs,
+        messageIndex,
+        toolUsePos,
+        sessionId,
+        status: 'idle' as const,
+        subagentByToolUse: {},
+        subagentContextByToolUse: {}
+      }
     }),
 
   pushLocalUser: (text) => {
@@ -186,6 +202,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return { subagentByToolUse: rest }
         }
         return { subagentByToolUse: { ...st.subagentByToolUse, [key]: info } }
+      })
+      return
+    }
+    if (event === 'subagent_context') {
+      const ctx = data as SubagentContextEvent
+      const key = ctx.parentToolUseId
+      set((st) => {
+        const bucket = st.subagentContextByToolUse[key] ?? []
+        // 上限 50 条 FIFO：超出丢最旧，防 DOM 爆炸（子代理活动通常 <50）
+        const next = [...bucket, ctx]
+        if (next.length > 50) next.splice(0, next.length - 50)
+        return { subagentContextByToolUse: { ...st.subagentContextByToolUse, [key]: next } }
       })
       return
     }

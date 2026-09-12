@@ -1,5 +1,12 @@
 import type { Logger } from 'pino'
-import type { ContextUsage, SlashCommand, SSEEvent, SubagentInfo, Usage } from './sse-events'
+import type {
+  ContextUsage,
+  SlashCommand,
+  SSEEvent,
+  SubagentContextEvent,
+  SubagentInfo,
+  Usage,
+} from './sse-events'
 
 /**
  * SDK 消息流 → SSEEvent 翻译循环（移植自 desktop translateStreamPersistent）。
@@ -37,6 +44,10 @@ export async function translateSessionStream(
   let currentMessageId: string | null = null
   let hasStreamedText = false
   let currentToolCallId: string | null = null
+  // 本轮 is_error result 是否已广播 error 事件。
+  // SDK 0.3.269：is_error result 后流结束时会抛 "Claude Code returned an error result"，
+  // 若不吞掉，registry 的 .catch 会再广播一次重复 error。flag 在新轮 message_start 清零。
+  let errorResultBroadcast = false
 
   const finishMessage = (partial: boolean): void => {
     if (currentMessageId && hasStreamedText) {
@@ -126,9 +137,16 @@ export async function translateSessionStream(
         const eventType = event.type as string
 
         if (eventType === 'message_start') {
+          // 新轮开始：清掉上一轮 is_error 标记（SDK 仅在流以 is_error 收尾时才抛）
+          errorResultBroadcast = false
           currentMessageId = crypto.randomUUID()
           hasStreamedText = false
-          onEvent({ event: 'message_start', data: { messageId: currentMessageId } })
+          // ttft_ms（首 token 毫秒）在 stream_event 包装层，仅 message_start 携带
+          const ttftMs = (message as { ttft_ms?: number }).ttft_ms
+          onEvent({
+            event: 'message_start',
+            data: { messageId: currentMessageId, ...(ttftMs != null ? { ttftMs } : {}) },
+          })
           onEvent({ event: 'status', data: { status: 'thinking' } })
         } else if (eventType === 'content_block_start') {
           const block = (event.content_block ?? {}) as { type?: string; id?: string; name?: string }
@@ -185,7 +203,16 @@ export async function translateSessionStream(
         continue
       }
 
+      // 完整 assistant 消息：forwardSubagentText 透传的子代理内容（带 parent_tool_use_id）。
+      // parent=null 的完整 assistant 一般不出现（主会话走 stream_event 增量）；若出现则忽略。
+      if (message.type === 'assistant') {
+        routeSubagentContext(message, onEvent)
+        continue
+      }
+
       if (message.type === 'user') {
+        // 子代理内部 tool_result（parent_tool_use_id 非空）→ 归桶，不进主线程、不建 checkpoint
+        if (routeSubagentContext(message, onEvent)) continue
         const uuid = (message as { uuid?: string }).uuid
         if (uuid) {
           onEvent({ event: 'checkpoint', data: { uuid } })
@@ -237,10 +264,18 @@ export async function translateSessionStream(
         // 字段——必须广播 error（前端插红字 system 消息）；只发 status:'error' 会被随后的
         // turn_end 重置回 idle，用户完全无感知
         if (m.is_error) {
-          const text = (message as { result?: unknown }).result
+          // success+is_error：错误文本在 result 字段；error_* subtype：在 errors[]
+          const resultText = (message as { result?: unknown }).result
+          const errorsArr = (m as { errors?: string[] }).errors
+          const text =
+            (typeof resultText === 'string' && resultText) ||
+            (Array.isArray(errorsArr) && errorsArr.length > 0
+              ? errorsArr.filter(Boolean).join('; ')
+              : '')
+          errorResultBroadcast = true
           onEvent({
             event: 'error',
-            data: { message: typeof text === 'string' && text ? text : '本轮执行失败' },
+            data: { message: text || '本轮执行失败' },
           })
         }
         // 多 turn：turn_end 后 continue；interrupt 不 abort（partial=false），close abort（partial=true）
@@ -253,6 +288,10 @@ export async function translateSessionStream(
   } catch (error) {
     // abort（关会话）：不报 error 事件；其它异常上抛由 registry 发 error
     finishMessage(abortController.signal.aborted)
+    // SDK 在 is_error result 收尾时抛 "Claude Code returned an error result"：
+    // 本轮 error 已在 result 分支广播，吞掉避免 registry .catch 再广播一次重复 error。
+    // 非 result 错误（连接/进程崩溃无 result）保持上抛由 registry 广播。
+    if (errorResultBroadcast) return
     throw error
   } finally {
     sessionLogger.info({ messageCount }, 'SDK 翻译循环退出')
@@ -299,6 +338,50 @@ function toSubagentDTO(message: Record<string, unknown>, subtype: string): Subag
     ...(str('summary') ? { summary: str('summary') } : {}),
     ...(status ? { status } : {}),
   }
+}
+
+/**
+ * 带 parent_tool_use_id 的完整 assistant/user 消息 → subagent_context 事件流。
+ * forwardSubagentText:true 时 SDK 把子代理 text/thinking/tool_use/tool_result 作为
+ * 完整消息（非 partial delta）送达，每条 content block 翻一条事件，按 parentToolUseId 归桶。
+ * 返回 true 表示已消费（不进主线程）。
+ */
+function routeSubagentContext(
+  message: Record<string, unknown>,
+  onEvent: (ev: SSEEvent) => void,
+): boolean {
+  const parentToolUseId = message.parent_tool_use_id
+  if (typeof parentToolUseId !== 'string' || !parentToolUseId) return false
+  const messageId = typeof message.uuid === 'string' ? message.uuid : undefined
+  const content = (message.message as { content?: unknown } | undefined)?.content
+  if (!Array.isArray(content)) return true // 已识别为子代理消息，即便无 content 也不再走主线程
+  for (const b of content as Array<Record<string, unknown>>) {
+    const t = typeof b.type === 'string' ? b.type : ''
+    const ev: SubagentContextEvent = { parentToolUseId, kind: 'text' }
+    if (messageId) ev.messageId = messageId
+    if (t === 'thinking') {
+      ev.kind = 'thinking'
+      ev.text = typeof b.thinking === 'string' ? b.thinking : ''
+      onEvent({ event: 'subagent_context', data: ev })
+    } else if (t === 'text') {
+      ev.kind = 'text'
+      ev.text = typeof b.text === 'string' ? b.text : ''
+      onEvent({ event: 'subagent_context', data: ev })
+    } else if (t === 'tool_use' && typeof b.id === 'string') {
+      ev.kind = 'tool_use'
+      ev.toolCallId = b.id
+      ev.name = typeof b.name === 'string' ? b.name : 'unknown'
+      ev.input = b.input
+      onEvent({ event: 'subagent_context', data: ev })
+    } else if (t === 'tool_result' && b.tool_use_id !== undefined) {
+      ev.kind = 'tool_result'
+      ev.toolCallId = typeof b.tool_use_id === 'string' ? b.tool_use_id : ''
+      ev.content = typeof b.content === 'string' ? b.content : JSON.stringify(b.content ?? '')
+      if (b.is_error) ev.error = true
+      onEvent({ event: 'subagent_context', data: ev })
+    }
+  }
+  return true
 }
 
 function toContextUsageDTO(c: unknown): ContextUsage {

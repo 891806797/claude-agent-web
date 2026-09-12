@@ -19,7 +19,13 @@ import { useChatStore } from '@/stores/chat'
 import { ApiError } from '@/lib/agent-api'
 import { formatTokens } from '@/lib/format'
 import type { ChatAgentApi, RewindResult } from '@/hooks/useChatAgentApi'
-import type { AgentStatus, Attachment, ChatMessage, ContentBlock } from '@/lib/agent-types'
+import type {
+  AgentStatus,
+  Attachment,
+  ChatMessage,
+  ContentBlock,
+  SubagentContextEvent
+} from '@/lib/agent-types'
 import {
   extractTag,
   extractTagContent,
@@ -851,6 +857,7 @@ function SubagentBlock({
       ? undefined
       : s.subagentByToolUse[toolUseId]
   )
+  const activities = useChatStore((s) => s.subagentContextByToolUse[toolUseId])
   const agentType =
     (input.subagent_type as string | undefined) ?? (input.name as string | undefined) ?? '子智能体'
   const promptPreview =
@@ -865,6 +872,8 @@ function SubagentBlock({
       ? `正在 ${subagent.lastToolName}`
       : (subagent.description ?? '运行中…')
     : '运行中…'
+  // 有活动流时标题显示步数
+  const stepBadge = activities && activities.length > 0 ? `${activities.length} 步` : ''
 
   return (
     <div className="py-0.5">
@@ -885,7 +894,13 @@ function SubagentBlock({
             {agentType}
           </code>
           {isRunning && <span className="text-[var(--text-faint)]">{progressLabel}</span>}
+          {stepBadge && (
+            <span className="text-[10px] text-[var(--text-faint)] tabular-nums">{stepBadge}</span>
+          )}
           {resultError && <span className="text-red-400">执行出错</span>}
+          <ChevronRightIcon
+            className={`size-3 text-[var(--text-faint)] transition-transform ${open ? 'rotate-90' : ''}`}
+          />
         </span>
       </Row>
 
@@ -898,6 +913,9 @@ function SubagentBlock({
               {promptPreview}
             </div>
           )}
+          {activities && activities.length > 0 && (
+            <ActivityList items={activities} running={isRunning} />
+          )}
           {result && (
             <div className="relative">
               <div className="max-h-[160px] overflow-auto text-[11px] text-[var(--text-faint)] bg-[var(--bg-layer-01)] p-2 rounded border border-[var(--border-muted)]">
@@ -909,6 +927,110 @@ function SubagentBlock({
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+/* ─── 子代理活动流（thinking/text/tool_use/tool_result 时间线）─── */
+
+const KIND_LABEL: Record<SubagentContextEvent['kind'], string> = {
+  thinking: '思考',
+  text: '输出',
+  tool_use: '工具',
+  tool_result: '结果'
+}
+
+function ActivityList({
+  items,
+  running
+}: {
+  items: SubagentContextEvent[]
+  running: boolean
+}): React.JSX.Element {
+  const scrollerRef = useRef<HTMLDivElement | null>(null)
+  const stickToBottom = useRef(true)
+
+  // 新项到达时跟随底部（用户上滚则不跟随）
+  useEffect(() => {
+    const el = scrollerRef.current
+    if (el && stickToBottom.current) el.scrollTop = el.scrollHeight
+  }, [items.length])
+
+  const onScroll = useCallback(() => {
+    const el = scrollerRef.current
+    if (!el) return
+    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+  }, [])
+
+  return (
+    <div
+      ref={scrollerRef}
+      onScroll={onScroll}
+      className="max-h-[180px] overflow-auto rounded border border-[var(--border-muted)] bg-[var(--bg-layer-01)] p-1.5 flex flex-col gap-1"
+      // 单一 aria-live 区域：新增项追加播报，勿每项一个 live region（ux: Contextual Live Badge）
+      aria-live="polite"
+      aria-label="子智能体活动"
+    >
+      {items.map((it, i) => (
+        <ActivityRow key={`${it.kind}-${i}`} item={it} running={running} />
+      ))}
+      {running && items.length === 0 && (
+        <span className="text-[11px] text-[var(--text-faint)] inline-flex items-center gap-1.5">
+          <Loader2Icon className="size-3 animate-spin text-purple-400" />
+          等待子智能体响应…
+        </span>
+      )}
+    </div>
+  )
+}
+
+function ActivityRow({
+  item,
+  running
+}: {
+  item: SubagentContextEvent
+  running: boolean
+}): React.JSX.Element {
+  const label = KIND_LABEL[item.kind]
+  // tool_use 行：running 时显示 spinner，否则显示 check（子代理结束后工具视为完成）
+  const showSpinner = item.kind === 'tool_use' && running
+  return (
+    <div className="text-[11px] flex items-start gap-1.5 leading-relaxed">
+      <span className="shrink-0 text-[var(--text-faint)] inline-flex items-center gap-1 w-14">
+        {showSpinner ? (
+          <Loader2Icon className="size-3 animate-spin text-purple-400" />
+        ) : item.kind === 'tool_result' ? (
+          <CheckIcon className={`size-3 ${item.error ? 'text-red-400' : 'text-green-400'}`} />
+        ) : (
+          <ChevronRightIcon className="size-3" />
+        )}
+        {label}
+      </span>
+      <span className="text-[var(--text-faint)] min-w-0 flex-1">
+        {item.kind === 'thinking' && (
+          <span className="italic opacity-80">{item.text}</span>
+        )}
+        {item.kind === 'text' && <span>{item.text}</span>}
+        {item.kind === 'tool_use' && (
+          <code className="font-mono text-[var(--text-muted)]">
+            {item.name}
+            {item.input && Object.keys(item.input as Record<string, unknown>).length > 0 && (
+              <span className="text-[var(--text-faint)]">
+                {' '}
+                {JSON.stringify(item.input).slice(0, 60)}
+                {JSON.stringify(item.input).length > 60 ? '…' : ''}
+              </span>
+            )}
+          </code>
+        )}
+        {item.kind === 'tool_result' && (
+          <span className={item.error ? 'text-red-400' : ''}>
+            {item.content && item.content.length > 80
+              ? item.content.slice(0, 80) + '…'
+              : item.content}
+          </span>
+        )}
+      </span>
     </div>
   )
 }

@@ -6,7 +6,18 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!ui", "!dist", "!.claude", "!src/db/migrations", "!data", "!logs"]
+    "includes": [
+      "**",
+      "!ui",
+      "!dist",
+      "!.claude",
+      "!src/db/migrations",
+      "!data",
+      "!logs",
+      "!test/sdk-behavior.ts",
+      "!test/sdk-subagent-behavior.ts",
+      "!test/sdk-subagent-e2e.ts"
+    ]
   },
   "formatter": {
     "enabled": true,

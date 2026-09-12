@@ -30,31 +30,36 @@ export default defineConfig({
       ? {
           [`${base}/api`]: {
             target: 'http://localhost:3000',
-            rewrite: (p) => p.slice(base.length) || '/'
+            changeOrigin: true,
+            rewrite: (p) => p.slice(base.length) || '/',
           },
           [`${base}/readyz`]: {
             target: 'http://localhost:3000',
-            rewrite: (p) => p.slice(base.length) || '/'
+            changeOrigin: true,
+            rewrite: (p) => p.slice(base.length) || '/',
           },
           [`${base}/healthz`]: {
             target: 'http://localhost:3000',
-            rewrite: (p) => p.slice(base.length) || '/'
+            changeOrigin: true,
+            rewrite: (p) => p.slice(base.length) || '/',
           },
           [`${base}/openapi.json`]: {
             target: 'http://localhost:3000',
-            rewrite: (p) => p.slice(base.length) || '/'
+            changeOrigin: true,
+            rewrite: (p) => p.slice(base.length) || '/',
           },
           [`${base}/docs`]: {
             target: 'http://localhost:3000',
-            rewrite: (p) => p.slice(base.length) || '/'
-          }
+            changeOrigin: true,
+            rewrite: (p) => p.slice(base.length) || '/',
+          },
         }
       : {
-          '/api': 'http://localhost:3000',
-          '/readyz': 'http://localhost:3000',
-          '/healthz': 'http://localhost:3000',
-          '/openapi.json': 'http://localhost:3000',
-          '/docs': 'http://localhost:3000'
-        }
-  }
+          '/api': { target: 'http://localhost:3000', changeOrigin: true },
+          '/readyz': { target: 'http://localhost:3000', changeOrigin: true },
+          '/healthz': { target: 'http://localhost:3000', changeOrigin: true },
+          '/openapi.json': { target: 'http://localhost:3000', changeOrigin: true },
+          '/docs': { target: 'http://localhost:3000', changeOrigin: true },
+        },
+  },
 })

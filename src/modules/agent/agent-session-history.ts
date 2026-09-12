@@ -102,10 +102,28 @@ function extractText(content: unknown): string {
   return ''
 }
 
-/** 编码 cwd 为 projects 子目录名（复刻 SDK：非字母数字一律替换为 -） */
-function encodeCwd(dir: string): string {
-  return dir.replace(/[^a-zA-Z0-9]/g, '-')
+/**
+ * 编码 cwd 为 projects 子目录名（复刻 SDK om(cwd) 算法，sdk.mjs Au/Os/$je/SC）：
+ * - 非字母数字一律替换为 -
+ * - 编码后超 200 字符：截断前 200 + '-' + Math.abs(hashCode(cwd)).toString(36)
+ *   （hash 输入是原始 cwd，非编码后；hashCode = Java String.hashCode：t=(t<<5)-t+charCode|0）
+ * 不复刻则长路径下 transcriptPath 与 SDK 实际存储目录不一致 → resume/list 断链。
+ */
+const SDK_PROJECT_DIR_LIMIT = 200
+
+function hashCode(s: string): number {
+  let t = 0
+  for (let n = 0; n < s.length; n++) t = ((t << 5) - t + s.charCodeAt(n)) | 0
+  return t
 }
+
+function encodeCwd(dir: string): string {
+  const enc = dir.replace(/[^a-zA-Z0-9]/g, '-')
+  if (enc.length <= SDK_PROJECT_DIR_LIMIT) return enc
+  return `${enc.slice(0, SDK_PROJECT_DIR_LIMIT)}-${Math.abs(hashCode(dir)).toString(36)}`
+}
+
+export { encodeCwd as _encodeCwdForTest }
 
 interface CompactBoundaryInfo {
   trigger: 'manual' | 'auto'

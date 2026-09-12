@@ -137,11 +137,32 @@ export interface SubagentInfo {
   status?: 'completed' | 'failed' | 'stopped'
 }
 
+/**
+ * 子代理内部上下文事件（forwardSubagentText:true 透传的完整 assistant/user 消息翻译）。
+ * SDK 把子代理 text/thinking/tool_use/tool_result 作为带 parent_tool_use_id 的完整消息送达
+ * （非 partial delta）；每条 content block 翻一条事件，按 parentToolUseId 归桶为活动流。
+ */
+export interface SubagentContextEvent {
+  parentToolUseId: string
+  kind: 'thinking' | 'text' | 'tool_use' | 'tool_result'
+  /** thinking/text 的文本内容 */
+  text?: string
+  /** tool_use 块：工具调用 id / 名称 / 入参 */
+  toolCallId?: string
+  name?: string
+  input?: unknown
+  /** tool_result 块：结果文本 / 是否出错 */
+  content?: string
+  error?: boolean
+  /** 子代理内该 assistant 消息 uuid（同消息多块共享，前端分组用） */
+  messageId?: string
+}
+
 export type SSEEvent =
   | { event: 'session'; data: { sessionId: string } }
   | { event: 'commands'; data: { commands: SlashCommand[] } }
   | { event: 'status'; data: { status: AgentStatus } }
-  | { event: 'message_start'; data: { messageId: string } }
+  | { event: 'message_start'; data: { messageId: string; ttftMs?: number } }
   | { event: 'text_chunk'; data: { messageId: string; delta: string } }
   | { event: 'thinking_chunk'; data: { messageId: string; delta: string } }
   | { event: 'tool_call_start'; data: { toolCallId: string; name: string; messageId: string } }
@@ -170,6 +191,7 @@ export type SSEEvent =
   | { event: 'message_end'; data: { messageId: string; partial?: boolean } }
   | { event: 'usage'; data: Usage }
   | { event: 'subagent_progress'; data: SubagentInfo }
+  | { event: 'subagent_context'; data: SubagentContextEvent }
   | { event: 'context_usage'; data: { context: ContextUsage } }
   | {
       event: 'compaction'
