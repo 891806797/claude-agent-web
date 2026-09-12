@@ -1,7 +1,6 @@
 import { api, ApiError, withBase } from './api'
 import type {
   ActiveSessionResult,
-  ChatMessage,
   FileContent,
   MoveResult,
   Persona,

@@ -1014,7 +1014,7 @@ function ActivityRow({
         {item.kind === 'tool_use' && (
           <code className="font-mono text-[var(--text-muted)]">
             {item.name}
-            {item.input && Object.keys(item.input as Record<string, unknown>).length > 0 && (
+            {item.input != null && Object.keys(item.input as Record<string, unknown>).length > 0 && (
               <span className="text-[var(--text-faint)]">
                 {' '}
                 {JSON.stringify(item.input).slice(0, 60)}

@@ -302,6 +302,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     if (event === 'tool_call_start') {
       const d = data as { toolCallId: string; name: string; messageId: string }
+      // 幂等兜底：重连/重放场景下同 toolCallId 不重复 append（防 React 同 key 撞车）
+      if (toolUsePos[d.toolCallId] !== undefined) {
+        set({ activeToolCall: { id: d.toolCallId, name: d.name }, status: 'tool-use' })
+        return
+      }
       const mi = messageIndex[d.messageId]
       if (mi === undefined) return
       const msg = messages[mi]
