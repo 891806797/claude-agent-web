@@ -219,4 +219,16 @@ export const authService = {
     pendingStore.delete(username)
     log().info({ target: username }, 'MFA 已被管理员重置')
   },
+
+  /**
+   * 本机免登：deep-link/csmcode 已把用户名带入，此处 ensureUser 落行 + 角色解析
+   * （白名单提升 admin，与登录出口同口径）→ 交由 route 层签 JWT 设 cookie。
+   * 不验密不验 MFA（信任本机），仅用于把真实用户名带进会话/审计。
+   */
+  async localLaunch(username: string): Promise<{ username: string; role: UserRole }> {
+    await authRepository.ensureUser(db, username)
+    await authRepository.touchLastLogin(db, username)
+    log().info({ username }, '本机免登令牌已签发')
+    return { username, role: await roleAfterLogin(username) }
+  },
 }

@@ -38,6 +38,14 @@ export const ErrorCodes = {
   AGENT_FILE_TOO_LARGE: { status: 413, message: '文件超过 1MB，不支持在线编辑' },
   AGENT_FILE_BINARY: { status: 415, message: '二进制文件不支持在线编辑' },
   AGENT_FILE_EXISTS: { status: 409, message: '文件或目录已存在' },
+  // ---- system 模块（deep-link 拉起 / 自更新 / 本机免登）----
+  SYSTEM_DEEPLINK_INVALID: { status: 422, message: 'deep-link 链接非法或缺必要参数' },
+  SYSTEM_DEEPLINK_NO_USER: { status: 422, message: 'deep-link 缺少用户标识，无法审计' },
+  SYSTEM_DOWNLOAD_FAILED: { status: 502, message: '下载工作空间压缩包失败' },
+  SYSTEM_NOT_READY: { status: 503, message: '服务尚未就绪，请稍后再试' },
+  SYSTEM_UPDATING: { status: 503, message: '正在更新中，请稍后再试' },
+  SYSTEM_UPDATE_UNCONFIGURED: { status: 509, message: '未配置更新清单地址，自更新不可用' },
+  SYSTEM_LAUNCH_TOKEN_INVALID: { status: 401, message: '启动令牌无效或已过期' },
 } as const satisfies Record<string, { status: number; message: string }>
 
 export type ErrorCode = keyof typeof ErrorCodes

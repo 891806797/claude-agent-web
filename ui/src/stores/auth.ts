@@ -30,6 +30,23 @@ export const useAuthStore = create<AuthState>((set) => ({
   setLoggedIn: (username, role) => set({ username, role, initialized: true }),
   hydrate: async () => {
     try {
+      // 本机免登：URL 带 ?launch=<一次性 token> 时先换 JWT（loopback-only，服务端设 cookie）
+      const urlParams = new URLSearchParams(window.location.search)
+      const launch = urlParams.get('launch')
+      if (launch) {
+        try {
+          await api.post('/api/auth/local-launch', { launch })
+        } catch {
+          // 令牌无效/过期/非本机：吞错，下面 /me 自会 401 → 跳登录
+        }
+        urlParams.delete('launch')
+        const search = urlParams.toString()
+        window.history.replaceState(
+          null,
+          '',
+          window.location.pathname + (search ? `?${search}` : '') + window.location.hash,
+        )
+      }
       const me = await api.get<{ username: string; role: UserRole }>('/api/auth/me')
       set({ username: me.username, role: me.role, initialized: true })
     } catch {

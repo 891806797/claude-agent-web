@@ -174,6 +174,28 @@ async function removeProject(id: string): Promise<void> {
   log().info({ projectId: id }, '项目已移除')
 }
 
+/**
+ * 项目白名单 upsert（deep-link bootstrap 用）：已注册直接回，未注册走 createProject
+ * 的路径校验 + stat + 落库。createProject 的 409 仅在并发注册的极窄竞态命中，
+ * 此时重新查询回既有行（幂等）。
+ */
+async function ensureProject(
+  username: string,
+  data: { name: string; path: string },
+): Promise<Project> {
+  const existing = await agentRepository.findProjectByPath(db, data.path)
+  if (existing) return toProject(existing)
+  try {
+    return await createProject(username, data)
+  } catch (err) {
+    if (AppError.is(err) && err.code === 'AGENT_PROJECT_PATH_EXISTS') {
+      const row = await agentRepository.findProjectByPath(db, data.path)
+      if (row) return toProject(row)
+    }
+    throw err
+  }
+}
+
 /** 项目 id → 归一化路径（白名单边界） */
 async function requireProjectDir(projectId: string): Promise<string> {
   const row = await agentRepository.findProjectById(db, projectId)
@@ -894,6 +916,7 @@ async function setRunMode(
 export const agentService = {
   listProjects,
   createProject,
+  ensureProject,
   removeProject,
   listPersonas,
   createPersona,

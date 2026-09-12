@@ -59,6 +59,12 @@ export const MeDto = z
   })
   .openapi('Me')
 
+/** 本机免登：一次性启动令牌（deep-link/csmcode 携带的 ?launch=）换 JWT */
+export const LocalLaunchInput = z.object({
+  launch: z.string().uuid().openapi({ example: '00000000-0000-0000-0000-000000000000' }),
+})
+
 export type LoginData = z.infer<typeof LoginInput>
 export type MfaTokenData = z.infer<typeof MfaTokenInput>
 export type MfaUnbindData = z.infer<typeof MfaUnbindInput>
+export type LocalLaunchData = z.infer<typeof LocalLaunchInput>

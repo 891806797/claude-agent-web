@@ -89,7 +89,7 @@ export function ChatPage(): React.JSX.Element {
     [me]
   )
 
-  // ===== URL 恢复（?ws=&sid=）：attach 活跃会话 → resume 兜底 =====
+  // ===== URL 恢复：?ws= 必填、?sid= 可缺（缺则取该工作空间最近会话，deep-link 落地用） =====
   const attachExisting = agent.attachExisting
   const resumeSession = agent.resumeSession
   useEffect(() => {
@@ -97,7 +97,7 @@ export function ChatPage(): React.JSX.Element {
     const wsParam = params.get('ws')
     const sidParam = params.get('sid')
     setHydrated(true)
-    if (!wsParam || !sidParam) return
+    if (!wsParam) return
     const matched = projects.find((p) => encodeDir(p.path) === wsParam)
     if (!matched) {
       toast.error('项目未注册或已被移除')
@@ -105,17 +105,45 @@ export function ChatPage(): React.JSX.Element {
     }
     setSelectedProjectId(matched.id)
     void (async () => {
+      // 解析目标 sid：显式 sid > 活跃会话 > 最近历史会话 > 新开
+      let sid: string | null = sidParam
+      if (!sid) {
+        try {
+          const active = await agentApi.getActiveSession(matched.path)
+          if (active.active) sid = active.active.sessionId
+        } catch {
+          // 落历史会话兜底
+        }
+      }
+      if (!sid) {
+        try {
+          const list = await agentApi.listSessions(matched.id, 1, 1)
+          if (list.length > 0) sid = list[0].id
+        } catch {
+          // 落新开兜底
+        }
+      }
+      if (!sid) {
+        try {
+          const r = await agentApi.openSession({ projectId: matched.id })
+          sid = r.sessionId
+        } catch (err) {
+          toast.error(err instanceof ApiError ? err.message : '开启会话失败')
+          return
+        }
+      }
+      if (!sid) return
       try {
-        const attached = await attachExisting(matched.path, sidParam)
-        if (!attached) await resumeSession(sidParam, matched.id)
-        syncUrl(params, setParams, matched.path, sidParam)
+        const attached = await attachExisting(matched.path, sid)
+        if (!attached) await resumeSession(sid, matched.id)
+        syncUrl(params, setParams, matched.path, sid)
       } catch (err) {
         if (err instanceof ApiError && err.status === 409) {
           const occ = extractOccupied(err.details)
           if (occ) {
             const retry = (evict: boolean): Promise<void> =>
-              resumeSession(sidParam, matched.id, evict).then(() => {
-                syncUrl(params, setParams, matched.path, sidParam)
+              resumeSession(sid!, matched.id, evict).then(() => {
+                syncUrl(params, setParams, matched.path, sid!)
               })
             // 同人占用：静默接管（同 openSession 分流逻辑）
             if (occ.username === me) {

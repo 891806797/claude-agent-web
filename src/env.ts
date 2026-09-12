@@ -105,6 +105,27 @@ const EnvSchema = z.object({
   ANTHROPIC_BASE_URL: z.string().optional(),
   ANTHROPIC_AUTH_TOKEN: z.string().optional(),
   ANTHROPIC_MODEL: z.string().optional(),
+
+  // ---- deep-link 拉起 + 本机免登（系统模块）----
+  /** 自定义协议 scheme（安装器注册同款；默认 csm-coding-agent-web，与桌面端 csm-coding-agent 区分防同机冲突） */
+  DEEP_LINK_SCHEME: z
+    .string()
+    .regex(/^[a-z][a-z0-9.-]*$/i)
+    .default('csm-coding-agent-web'),
+  /** 接口平台地址（deep-link bootstrap 生成《内部接口文档.md》用，portal/service 免鉴权） */
+  INTERFACE_PLATFORM_BASE_URL: z
+    .string()
+    .url()
+    .default('https://openapi.msuncloud.com')
+    .transform((v) => v.replace(/\/+$/, '')),
+  /** csmcode 裸启审计用户名缺省（可被 --user 覆盖；deep-link 则用 URL 的 user 参数） */
+  CSMCODE_USER: z.string().optional(),
+
+  // ---- 自更新（系统模块）----
+  /** latest.json 清单地址（OBS 发布根 + /latest.json）；未配置时自更新禁用 */
+  UPDATE_MANIFEST_URL: z.string().url().optional(),
+  /** OBS 发布前缀（publish-obs 脚本用，运行时不读） */
+  OBS_PUBLISH_PREFIX: z.string().optional(),
 })
 
 const parsed = EnvSchema.safeParse(Bun.env)

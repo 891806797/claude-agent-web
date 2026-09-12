@@ -128,6 +128,9 @@ async function main() {
     target,
     '--outfile',
     `${OUT_DIR}/app-${platformArch}-${version}`,
+    // 注入版本号到 system.service.getCurrentVersion()（typeof APP_VERSION 守卫，dev 未定义回退）
+    '--define',
+    `APP_VERSION='"${version}"'`,
     'src/index.ts',
   ]
   if (process.env.WSL_DISTRO_NAME) {

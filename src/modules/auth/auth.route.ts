@@ -1,11 +1,14 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import type { Context } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
+import { AppError } from '@/core/app-error'
 import { getLogger } from '@/core/logger'
 import { AUTH_COOKIE, requireAuth } from '@/core/middleware/auth'
 import { ApiResponseSchema, ErrorResponseSchema, jsonResponse, ok } from '@/core/response'
 import type { App, AppEnv } from '@/core/types'
+import { consumeLaunchToken } from '@/modules/system/launch-token'
 import {
+  LocalLaunchInput,
   LoginInput,
   LoginResultDto,
   MeDto,
@@ -157,6 +160,20 @@ const meRoute = createRoute({
   },
 })
 
+const localLaunchRoute = createRoute({
+  method: 'post',
+  path: '/local-launch',
+  tags: ['auth'],
+  summary: '本机免登：一次性启动令牌换 JWT（deep-link/csmcode 携带 ?launch=）',
+  request: {
+    body: { required: true, content: { 'application/json': { schema: LocalLaunchInput } } },
+  },
+  responses: {
+    200: jsonResponse(ApiResponseSchema(MeDto), '已登录'),
+    401: jsonResponse(ErrorResponseSchema, '令牌无效/已过期/非本机'),
+  },
+})
+
 export function registerAuthRoutes(app: App): void {
   app.openapi(loginRoute, async (c) => {
     const input = c.req.valid('json')
@@ -206,5 +223,21 @@ export function registerAuthRoutes(app: App): void {
     // role 取自已验签 token（requireAuth 已通过）；role 字段之前的旧 token 按 user 处理
     const token = getCookie(c, AUTH_COOKIE)
     return ok(c, { username: c.get('username'), role: token ? roleFromToken(token) : 'user' })
+  })
+
+  app.openapi(localLaunchRoute, async (c) => {
+    // loopback-only：经反代带 x-forwarded-for 的请求拒绝（与 clientIp 同口径）
+    if (c.req.header('x-forwarded-for')) {
+      throw new AppError('SYSTEM_LAUNCH_TOKEN_INVALID', { message: '仅限本机调用' })
+    }
+    const { launch } = c.req.valid('json')
+    const username = consumeLaunchToken(launch)
+    if (!username) {
+      throw new AppError('SYSTEM_LAUNCH_TOKEN_INVALID')
+    }
+    const { username: u, role } = await authService.localLaunch(username)
+    setAuthCookie(c, signToken(u, role))
+    logger.info({ username: u }, '本机免登登录成功')
+    return ok(c, { username: u, role })
   })
 }
